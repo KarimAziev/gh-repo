@@ -1,0 +1,74 @@
+* gh-repo
+
+Create and manage gh repositories.
+
+** Installation
+
+*** Manually
+
+Download repository and it to your load path in your init file:
+
+#+begin_src elisp :eval no
+
+(add-to-list 'load-path "/path/to/gh-repo/")
+
+(require 'gh-repo)
+
+#+end_src
+
+*** With use-package and straight
+
+#+begin_src elisp :eval no
+
+(use-package gh-repo
+  :straight (:repo "KarimAziev/gh-repo" :type git :host github)
+  :bind (("C-c k g" . gh-repo-hydra/body)))
+
+#+end_src
+
+** Commands
+
++ ~gh-repo-read-user-repo~
+Read user repository and execute one of the action from ~gh-repo-actions~. During minibuffer completion next commands are available:
+
+| Default Key | Command description                                        |
+|-------------+------------------------------------------------------------|
+| M-<up>      | change number of repositories to display                   |
+| C->         | exit minibuffe and switch to hydra for creating repository |
+|             |                                                            |
+
+To change default keybinding modify ~gh-repos-minibuffer-map~, e.g.:
+
+#+begin_src emacs-lisp
+(require 'gh-repo)
+(define-key gh-repos-minibuffer-map (kbd "C-]") 'gh-repo-switch-to-hydra)
+(define-key gh-repos-minibuffer-map (kbd "C-c C-l") 'gh-repo-change-repos-limit)
+#+end_src
+
+Or if you use use-package and straight:
+#+begin_src emacs-lisp
+
+(use-package gh-repo
+  :straight (:repo "KarimAziev/gh-repo" :type git :host github)
+  :bind (("C-c k g" . gh-repo-hydra/body)
+         (:map gh-repos-minibuffer-map
+               ("C-c C-l" . gh-repo-change-repos-limit)
+               ("C-]" . gh-repo-switch-to-hydra))))
+#+end_src
+
++ ~gh-repo-hydra/body~
+  Hydra for creating new repository.
+
+** Customization
+
++ ~gh-repo-actions~
+Default actions for ~gh-repo~ includes cloning, browsing, viewing and removing.
+You can add your own actions by customizing ~gh-repo-actions~.
+
+Your action should accept one argument - repository name.
+
++ ~gh-repo-download-default-repo-dir~
+Default directory for downloading and cloning repositories.
+
++ ~gh-repo-default-license~
+Default repository license for new repositories.
