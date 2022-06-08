@@ -6,7 +6,7 @@ Create and manage gh repositories.
 - [[https://cli.github.com/manual/][GitHub CLI]]
 - [[https://github.com/tkf/emacs-request][emacs-request]]
 - [[https://github.com/abo-abo/hydra][hydra]]
-- [[https://magit.vc/manual/forge/Token-Creation.html#Token-Creation][a Github API token]]
+- [[https://magit.vc/manual/forge/Token-Creation.html#Token-Creation][Github API token]]
 
 GH token is required with :host *api.github.com* in ~auth-sources~ (usually it is ~~/.authinfo~ or ~~/.authinfo.gpg~), e.g.:
 
@@ -70,11 +70,10 @@ And then you can change user with command ~gh-repo-change-user~.
 + ~gh-repo-read-user-repo~
 Read user repository and execute one of the action from ~gh-repo-actions~. During minibuffer completion next commands are available:
 
-| Default Key | Command description                                        |
-|-------------+------------------------------------------------------------|
-| M-<up>      | change number of repositories to display                   |
-| C->         | exit minibuffe and switch to hydra for creating repository |
-|             |                                                            |
+| Default Key | Command description                      |
+|-------------+------------------------------------------|
+| M-<up>      | change number of repositories to display |
+| C->         | exit minibuffer and switch to hydra      |
 
 To change default keybinding modify ~gh-repos-minibuffer-map~, e.g.:
 
