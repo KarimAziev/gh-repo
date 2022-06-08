@@ -2,6 +2,27 @@
 
 Create and manage gh repositories.
 
+** Prerequisites
+- [[https://cli.github.com/manual/][GitHub CLI]]
+- [[https://github.com/tkf/emacs-request][emacs-request]]
+- [[https://github.com/abo-abo/hydra][hydra]]
+- [[https://magit.vc/manual/forge/Token-Creation.html#Token-Creation][a Github API token]]
+
+GH token is required with :host *api.github.com* in ~auth-sources~ (usually it is ~~/.authinfo~ or ~~/.authinfo.gpg~), e.g.:
+
+#+begin_example
+machine api.github.com login my-gh-username password my-gh-token
+#+end_example
+
+Multiple users are allowed. For example:
+
+#+begin_example
+machine api.github.com login github-username-1 password gh-token-password-for-user1
+machine api.github.com login github-username-2 password gh-token-password-for-user2
+#+end_example
+
+And then you can change user with command ~gh-repo-change-user~.
+
 ** Installation
 
 *** Manually
@@ -22,9 +43,27 @@ Download repository and it to your load path in your init file:
 
 (use-package gh-repo
   :straight (:repo "KarimAziev/gh-repo" :type git :host github)
-  :bind (("C-c k g" . gh-repo-hydra/body)))
+  :bind (("C-c k g" . gh-repo-hydra/body)
+         ("C-c k r" . gh-repo-read-user-repo)))
 
 #+end_src
+
+** Setup
+
+Gh-repo lookup for gh token with :host *api.github.com* in ~auth-sources~ (usually it is ~~/.authinfo~ or ~~/.authinfo.gpg~), e.g.:
+
+#+begin_example
+machine api.github.com login my-gh-username password my-gh-token
+#+end_example
+
+Multiple users are allowed. For example:
+
+#+begin_example
+machine api.github.com login github-username-1 password gh-token-password-for-user1
+machine api.github.com login github-username-2 password gh-token-password-for-user2
+#+end_example
+
+And then you can change user with command ~gh-repo-change-user~.
 
 ** Commands
 
@@ -46,11 +85,13 @@ To change default keybinding modify ~gh-repos-minibuffer-map~, e.g.:
 #+end_src
 
 Or if you use use-package and straight:
+
 #+begin_src emacs-lisp
 
 (use-package gh-repo
   :straight (:repo "KarimAziev/gh-repo" :type git :host github)
   :bind (("C-c k g" . gh-repo-hydra/body)
+         ("C-c k r" . gh-repo-read-user-repo)
          (:map gh-repos-minibuffer-map
                ("C-c C-l" . gh-repo-change-repos-limit)
                ("C-]" . gh-repo-switch-to-hydra))))
@@ -62,10 +103,19 @@ Or if you use use-package and straight:
 ** Customization
 
 + ~gh-repo-actions~
-Default actions for ~gh-repo~ includes cloning, browsing, viewing and removing.
-You can add your own actions by customizing ~gh-repo-actions~.
 
-Your action should accept one argument - repository name.
+Default actions for ~gh-repo-read-user-repo~ includes cloning, browsing, viewing and removing.
+
+You can add your own actions by customizing the variable ~gh-repo-actions~.
+
+Your action should accept one argument - repository name. For example
+
+#+begin_src emacs-lisp :eval no
+(defun my-gh-action (name)
+  (browse-url (concat "https://github.com/" name)))
+
+(add-to-list 'gh-repo-actions '(?o "open in browser" my-gh-action))
+#+end_src
 
 + ~gh-repo-download-default-repo-dir~
 Default directory for downloading and cloning repositories.

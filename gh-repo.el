@@ -61,7 +61,7 @@
                              (?b "browse" gh-repo-visit)
                              (?v "view" gh-repo-view-repo)
                              (?D "delete" gh-repo-remove))
-  "Actions for `gh-repo'.
+  "Actions for `gh-repo-read-user-repo'.
 
 Each element is a list comprising (KEY LABEL ACTION)
 
@@ -903,27 +903,6 @@ Each item is propertized with :type (private or public) and :description."
         (gh-repo-exec-in-dir command project-dir))
     (message "Cannot clone")))
 
-;;;###autoload
-(defun gh-repo-switch-to-hydra ()
-  "During active minibuffer completion just exit it.
-During inactive minibuffer call `gh-repo-hydra/body'."
-  (interactive)
-  (if (active-minibuffer-window)
-      (exit-minibuffer)
-    (gh-repo-hydra/body)))
-
-;;;###autoload
-(defun gh-repo-change-repos-limit ()
-  "During active minibuffer completion just exit it.
-During inactive minibuffer read value for `gh-repo-repos-limit',
-and invoke `gh-repo'."
-  (interactive)
-  (if (active-minibuffer-window)
-      (exit-minibuffer)
-    (setq gh-repo-repos-limit
-          (read-number "gh repo list --limit\s"))
-    (gh-repo-read-user-repo)))
-
 (defun gh-repo-remove (repo)
 	"Ask user a \"y or n\" question and remove gh REPO if y."
   (when (and (stringp repo)
@@ -940,6 +919,27 @@ and invoke `gh-repo'."
    (if (string-match-p "^https://" repo)
        repo
      (concat "https://github.com/" repo))))
+
+;;;###autoload
+(defun gh-repo-switch-to-hydra ()
+  "During active minibuffer completion just exit it.
+During inactive minibuffer call `gh-repo-hydra/body'."
+  (interactive)
+  (if (active-minibuffer-window)
+      (exit-minibuffer)
+    (gh-repo-hydra/body)))
+
+;;;###autoload
+(defun gh-repo-change-repos-limit ()
+  "During active minibuffer completion just exit it.
+During inactive minibuffer read value for `gh-repo-repos-limit',
+and invoke `gh-repo-read-user-repo'."
+  (interactive)
+  (if (active-minibuffer-window)
+      (exit-minibuffer)
+    (setq gh-repo-repos-limit
+          (read-number "gh repo list --limit\s"))
+    (gh-repo-read-user-repo)))
 
 (defvar gh-repos-minibuffer-map
   (let ((map (make-sparse-keymap)))
@@ -983,6 +983,8 @@ During minibuffer completion next commands are available:
 \\<gh-repos-minibuffer-map>\ `\\[gh-repo-change-repos-limit]' - to change number of displayed repositories,
 `\\[gh-repo-switch-to-hydra]' switch to hydra."
   (interactive)
+  (setq gh-repo-current-user (or gh-repo-current-user
+                                 (gh-repo-get-current-user)))
   (let ((repo (gh-repo--read-user-repo)))
     (pcase this-command
       ('gh-repo-change-repos-limit
