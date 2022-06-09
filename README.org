@@ -6,6 +6,7 @@ Create and manage gh repositories.
 - [[https://cli.github.com/manual/][GitHub CLI]]
 - [[https://github.com/tkf/emacs-request][emacs-request]]
 - [[https://github.com/abo-abo/hydra][hydra]]
+- [[https://github.com/sharkdp/fd][fd]] or find (optional)
 - [[https://magit.vc/manual/forge/Token-Creation.html#Token-Creation][Github API token]]
 
 GH token is required with =:host= *api.github.com* in ~auth-sources~ (usually it is =~/.authinfo= or =~/.authinfo.gpg=), e.g.:
@@ -69,7 +70,7 @@ Hydra for creating and configuring new repository.
 | C   | create repository with current options    |
 
 + ~gh-repo-read-user-repo~
-Read user repository and execute one of the action from ~gh-repo-actions~. During minibuffer completion next commands are available:
+Read user repository and prompt and execute one of the action from ~gh-repo-actions~. During minibuffer completion next commands are available:
 
 | Default Key | Command description                      |
 |-------------+------------------------------------------|
