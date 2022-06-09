@@ -8,7 +8,7 @@ Create and manage gh repositories.
 - [[https://github.com/abo-abo/hydra][hydra]]
 - [[https://magit.vc/manual/forge/Token-Creation.html#Token-Creation][Github API token]]
 
-GH token is required with :host *api.github.com* in ~auth-sources~ (usually it is ~~/.authinfo~ or ~~/.authinfo.gpg~), e.g.:
+GH token is required with =:host= *api.github.com* in ~auth-sources~ (usually it is =~/.authinfo= or =~/.authinfo.gpg=), e.g.:
 
 #+begin_example
 machine api.github.com login my-gh-username password my-gh-token
@@ -48,24 +48,25 @@ Download repository and it to your load path in your init file:
 
 #+end_src
 
-** Setup
-
-Gh-repo lookup for gh token with :host *api.github.com* in ~auth-sources~ (usually it is ~~/.authinfo~ or ~~/.authinfo.gpg~), e.g.:
-
-#+begin_example
-machine api.github.com login my-gh-username password my-gh-token
-#+end_example
-
-Multiple users are allowed. For example:
-
-#+begin_example
-machine api.github.com login github-username-1 password gh-token-password-for-user1
-machine api.github.com login github-username-2 password gh-token-password-for-user2
-#+end_example
-
-And then you can change user with command ~gh-repo-change-user~.
-
 ** Commands
++ ~gh-repo-hydra/body~
+
+Hydra for creating and configuring new repository.
+
+| Key | Description                               |
+|-----+-------------------------------------------|
+| n   | name for new repository                   |
+| c   | directory for cloning new repository      |
+| u   | change gh user                            |
+| p   | toggle visibility (--private or --public) |
+| P   | toggle --push                             |
+| w   | disable wiki                              |
+| i   | disable issues                            |
+| I   | make new repository internal              |
+| d   | specify description for repository        |
+| l   | specify Open Source license               |
+| g   | specify gitignore template                |
+| C   | create repository with current options    |
 
 + ~gh-repo-read-user-repo~
 Read user repository and execute one of the action from ~gh-repo-actions~. During minibuffer completion next commands are available:
@@ -96,8 +97,6 @@ Or if you use use-package and straight:
                ("C-]" . gh-repo-switch-to-hydra))))
 #+end_src
 
-+ ~gh-repo-hydra/body~
-  Hydra for creating new repository.
 
 ** Customization
 

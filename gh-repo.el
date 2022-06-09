@@ -1009,19 +1009,20 @@ During minibuffer completion next commands are available:
   (:color pink :pre
           (setq gh-repo-current-user (gh-repo-get-current-user)))
   "
-_n_ gh-repo-create-read-repo-name      %`gh-repo--name
-_c_ gh-repo-create-read-clone-dir      %`gh-repo--clone-dir
-_u_ gh-repo-change-user                %`gh-repo-current-user
-_p_ gh-repo--private-toggle            %`gh-repo--private
-_P_ gh-repo--push-toggle               %`gh-repo--push
-_w_ gh-repo--disable-wiki-toggle       %`gh-repo--disable-wiki
-_i_ gh-repo--disable-issues-toggle     %`gh-repo--disable-issues
-_I_ gh-repo--internal-toggle           %`gh-repo--internal
-_d_ gh-repo--description-read          %`gh-repo--description
-_l_ gh-repo-read-license               %`gh-repo--license
-_g_ gh-repo-read-gitignore-read        %`gh-repo--gitignore
-_C_ gh-repo-create-repo                %(gh-repo-generic-command)
-_C->_ my repos
+Create new repository options:
+_n_ ame                                %`gh-repo--name
+_c_ where to [c]lone                   %`gh-repo--clone-dir
+_u_ change [u]ser                      %`gh-repo-current-user
+_p_ [p]rivate or [p]ublic              %`gh-repo--private
+_P_ toggle --push                      %`gh-repo--push
+_w_ disable wiki                       %`gh-repo--disable-wiki
+_i_ disable issues                     %`gh-repo--disable-issues
+_I_ make [I]nternal                    %`gh-repo--internal
+_d_ description                        %`gh-repo--description
+_l_ specify license                    %`gh-repo--license
+_g_ specify [g]itignore template       %`gh-repo--gitignore
+_C_ run [C]ommand                      %(gh-repo-generic-command)
+_C->_ show all my repos
 "
   ("n" gh-repo-create-read-repo-name nil)
   ("c" gh-repo-create-read-clone-dir nil)
@@ -1035,10 +1036,8 @@ _C->_ my repos
   ("l" gh-repo-read-license nil)
   ("g" gh-repo-read-gitignore-read nil)
   ("C" gh-repo-create-repo nil)
-  ("C->" gh-repo-read-user-repo :exit t)
+  ("C->" gh-repo-read-user-repo nil :exit t)
   ("q" nil "quit"))
-
-(define-key global-map (kbd "C-c k g") 'gh-repo-hydra/body)
 
 (provide 'gh-repo)
 ;;; gh-repo.el ends here
