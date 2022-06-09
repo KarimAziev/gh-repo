@@ -35,18 +35,6 @@
 (require 'request)
 (require 'auth-source)
 
-(defvar gh-repo-git-host-regexp
-  (concat "\\("
-          "\\(\\(github\\|gitlab\\|gitlab\\.[a-z]+\\)\\.com\\)"
-          "\\|"
-          "\\(\\(bitbucket\\|salsa[\\.]debian\\|framagit\\|codeberg\\|git[\\.]savannah[\\.]gnu\\|git[\\.]kernel\\|git[\\.]suckless\\|code[\\.]orgmode\\|gitlab[\\.]gnome\\)[\\.]org\\)"
-          "\\|"
-          "\\(\\(repo[\\.]or\\)[\\.]cz\\)"
-          "\\|"
-          "\\(git\\.sr\\.ht\\)"
-          "\\)")
-  "Regexp matching common githosts.")
-
 (defcustom gh-repo-default-license "gpl-3.0"
   "Default repository license."
   :type 'string
@@ -91,20 +79,6 @@ ACTION is a a function which should accept one argument
                `(apply #',init-fn args)
              `(apply ,init-fn args)))))))
 
-(defun gh-repo-compose-while-not-nil (&rest functions)
-   "Return right-to-left composition from FUNCTIONS."
-  (let ((fn))
-    (setq functions (reverse functions))
-    (setq fn (pop functions))
-    (lambda (&rest args)
-      (let ((arg (unless (null (flatten-list args))
-                   (apply fn args))))
-        (while (setq fn (unless (null arg)
-                          (pop functions)))
-          (let ((res (apply fn (list arg))))
-            (setq arg res)))
-        arg))))
-
 (defmacro gh-repo--rpartial (fn &rest args)
   "Return a partial application of FN to right-hand ARGS.
 
@@ -133,25 +107,6 @@ at the values with which this function was called."
   "Return right-to-left composition from FUNCTIONS."
   (declare (debug t) (pure t) (side-effect-free t))
   `(gh-repo--pipe ,@(reverse functions)))
-
-(defun gh-repo-fdfind-generic-list-to-string (&rest flags)
-  "Flattenize and concat FLAGS without nils."
-  (setq flags (delete nil (flatten-list flags)))
-  (when flags
-    (string-join flags "\s")))
-
-(defun gh-repo-fdfind-find (place &optional flags)
-  "Return list of files  in PLACE.
-PLACE can be a directory, list of directories, or alist of directories
-with extra flags.
-
-FLAGS can be string, list or alist of strings."
-  (split-string (shell-command-to-string
-                 (gh-repo-fdfind-generic-list-to-string
-                  "fdfind" "--color=never"
-                  flags
-                  (gh-repo-fdfind-generic-list-to-string "." place)))
-                "\n" t))
 
 (defun gh-repo-fontify (content &optional mode-fn &rest args)
   "Fontify CONTENT according to MODE-FN called with ARGS.
@@ -237,13 +192,6 @@ ITEM can be propertized string or plist."
           (setq last (cdr new)))))
     (apply 'propertize string (cdr result))))
 
-(defun gh-repo-file-slash (dir)
-  "Add slash to DIR if none."
-  (when dir
-    (if (string-match-p "/$" dir)
-        dir
-      (setq dir (concat dir "/")))))
-
 (defun gh-repo-file-parent (path)
   "Return the parent directory to PATH without slash."
   (let ((parent (file-name-directory
@@ -293,7 +241,8 @@ ITEM can be propertized string or plist."
   "Run a shell COMMAND and return its output as a string, whitespace trimmed."
   (string-trim (shell-command-to-string command)))
 
-(defun gh-repo-file-dirs-recoursively (directory &optional match depth filter-fn)
+(defun gh-repo-file-dirs-recoursively (directory &optional match depth
+                                                 filter-fn)
   "Return list of directories in DIRECTORY that matches MATCH.
 With optional argument DEPTH limit max depth.
 If FILTER-FN passed call it with directories."
@@ -313,20 +262,14 @@ If FILTER-FN passed call it with directories."
           (push it acc)
           (setq acc (if (or (not (numberp depth))
                             (> depth 0))
-                        (append acc (gh-repo-file-dirs-recoursively it
-                                                                    match
-                                                                    (when depth
-                                                                      (1- depth))
-                                                                    filter-fn))
+                        (append acc (gh-repo-file-dirs-recoursively
+                                     it
+                                     match
+                                     (when depth
+                                       (1- depth))
+                                     filter-fn))
                       acc))))
       acc)))
-
-(defun gh-repo-https-url-p (url)
-  "Return t if URL string is githost with https protocol."
-  (not (null
-        (string-match-p
-         (concat "https://" gh-repo-git-host-regexp)
-         url))))
 
 (defun gh-repo-non-git-dirs-recoursively (directory &optional match depth)
   "Return list of non git directories in DIRECTORY that matches MATCH.
@@ -343,73 +286,10 @@ With optional argument DEPTH limit max depth."
                      (file-exists-p (expand-file-name "node_modules" it))))))
        result))))
 
-(defun gh-repo-directory-files (directory &optional nosort)
-  "Return a list of names of files in DIRECTORY excluding \".\" and \"..\".
-
-Names are that are relative to the specified directory.
-
-If NOSORT is non-nil, the list is not sorted--its order is unpredictable.
- Otherwise, the list returned is sorted with string-lessp."
-  (directory-files directory nil
-                   directory-files-no-dot-files-regexp nosort))
-
-(defun gh-repo-dir-empty-p (directory)
-  "Return t if DIRECTORY is empty."
-  (null (gh-repo-directory-files directory)))
-
-(defun gh-repo-git-alist-ssh-hosts ()
-  "Return hosts found in .ssh/config."
-  (when (file-exists-p "~/.ssh/config")
-    (with-temp-buffer
-      (insert-file-contents
-       "~/.ssh/config")
-      (let ((alist))
-        (while (re-search-forward
-                "\\(HOST[\s\t]\\([^\n]+\\)[\n\s\t]+HOSTNAME[\s\t\n]\\([^\s\t\n]+\\)\\)"
-                nil t 1)
-          (let ((host (match-string-no-properties 2))
-                (hostname (match-string-no-properties 3)))
-            (push (cons host hostname) alist)))
-        alist))))
-
-(defun gh-repo-git-ssh-url-p (url)
-  "Return t if URL string is githost with git protocol."
-  (string-match-p
-   (concat "git@" gh-repo-git-host-regexp)
-   url))
-
-(defun gh-repo-file-change-ext (file new-ext)
-  "Replace extension of FILE with NEW-EXT."
-  (concat (file-name-sans-extension file) "." new-ext))
-
-(defun gh-repo-apply-when (guard fn &rest args)
-  "Apply FN when result of call GUARD with ARGS non nil."
-  (when (apply guard args)
-    (apply fn args)))
-
-(defun gh-repo-git-url-https-to-ssh (url &optional ssh-host)
-  "Transform URL with https protocol to ssh.
-With optional argument SSH-HOST also replace host."
-  (when-let ((urlobj (when (and url
-                                (gh-repo-https-url-p url))
-                       (url-generic-parse-url url))))
-    (when-let ((host (url-host urlobj))
-               (reponame (funcall
-                          (gh-repo-compose-while-not-nil
-                           (gh-repo--rpartial 'gh-repo-file-change-ext "git")
-                           (gh-repo--rpartial 'string-join "/")
-                           (gh-repo--partial
-                            'gh-repo-apply-when
-                            (gh-repo--compose
-                             (apply-partially '<= 2) 'length)
-                            (gh-repo--rpartial 'seq-take 2))
-                           (gh-repo--rpartial 'split-string "/")
-                           (apply-partially
-                            'replace-regexp-in-string
-                            "^/\\|/$" "")
-                           'url-filename)
-                          urlobj)))
-      (string-trim (concat "git@" (or ssh-host host) ":" reponame)))))
+(defun gh-repo-vc-dir-p (directory)
+  "Return the root directory for the DIRECTORY VC tree."
+  (let ((default-directory directory))
+    (vc-root-dir)))
 
 (defun gh-repo-exec-in-dir (command project-dir &optional callback)
   "Execute COMMAND in PROJECT-DIR.
@@ -452,7 +332,7 @@ Invoke CALLBACK without args."
 (defvar gh-repo--license gh-repo-default-license)
 (defvar gh-repo--gitignore nil)
 (defvar gh-repo--name nil)
-(defvar gh-repo--clone-dir nil)
+
 (defvar gh-repo-current-user nil)
 (defun gh-repo-get-current-user ()
   "Return name of currently logged gh user or nil."
@@ -504,9 +384,9 @@ Invoke CALLBACK without args."
           (yes-or-no-p (format "Change user %s?" gh-repo-current-user)))
       (setq gh-repo-current-user
             (gh-repo-login-with-token (or
-                                     (gh-repo-read-token)
-                                     (read-passwd
-                                      "GH token:\s"))))
+                                       (gh-repo-read-token)
+                                       (read-passwd
+                                        "GH token:\s"))))
     gh-repo-current-user))
 
 (defvar gh-repo-licence-types nil)
@@ -554,9 +434,10 @@ Invoke CALLBACK without args."
 (defun gh-repo--description-read ()
   "Read a description in the minibuffer, with completion."
   (interactive)
-  (setq gh-repo--description (read-string
-                              "--description\s"
-                              gh-repo--description)))
+  (setq gh-repo--description (prin1-to-string
+                              (read-string
+                               "--description\s"
+                               gh-repo--description))))
 
 ;;;###autoload
 (defun gh-repo-read-gitignore-read ()
@@ -565,47 +446,6 @@ Invoke CALLBACK without args."
   (setq gh-repo--gitignore (completing-read
                             "--gitignore\s"
                             '("AL" "Actionscript" "Ada" "Agda" "Android" "AppEngine" "AppceleratorTitanium" "ArchLinuxPackages" "Autotools" "C++" "C" "CFWheels" "CMake" "CUDA" "CakePHP" "ChefCookbook" "Clojure" "CodeIgniter" "CommonLisp" "Composer" "Concrete5" "Coq" "CraftCMS" "D" "DM" "Dart" "Delphi" "Drupal" "EPiServer" "Eagle" "Elisp" "Elixir" "Elm" "Erlang" "ExpressionEngine" "ExtJs" "Fancy" "Finale" "FlaxEngine" "ForceDotCom" "Fortran" "FuelPHP" "GWT" "Gcov" "GitBook" "AL" "Anjuta" "Ansible" "Archives" "Backup" "Bazaar" "BricxCC" "CVS" "Calabash" "Cloud9" "CodeKit" "DartEditor" "Diff" "Dreamweaver" "Dropbox" "Eclipse" "EiffelStudio" "Emacs" "Ensime" "Espresso" "FlexBuilder" "GPG" "Images" "JDeveloper" "JEnv" "JetBrains" "KDevelop4" "Kate" "Lazarus" "LibreOffice" "Linux" "LyX" "MATLAB" "Mercurial" "Metals" "MicrosoftOffice" "ModelSim" "Momentics" "MonoDevelop" "NetBeans" "Ninja" "NotepadPP" "Octave" "Otto" "PSoCCreator" "Patch" "PuTTY" "Redcar" "Redis" "SBT" "SVN" "SlickEdit" "Stata" "SublimeText" "Syncthing" "SynopsysVCS" "Tags" "TextMate" "TortoiseGit" "Vagrant" "Vim" "VirtualEnv" "Virtuoso" "VisualStudioCode" "WebMethods" "Windows" "Xcode" "XilinxISE" "macOS" "Go" "Godot" "Gradle" "Grails" "Haskell" "IGORPro" "Idris" "JBoss" "JENKINS_HOME" "Java" "Jekyll" "Joomla" "Julia" "KiCad" "Kohana" "Kotlin" "LabVIEW" "Laravel" "Leiningen" "LemonStand" "Lilypond" "Lithium" "Lua" "Magento" "Maven" "Mercury" "MetaProgrammingSystem" "Nanoc" "Nim" "Node" "OCaml" "Objective-C" "Opa" "OpenCart" "OracleForms" "Packer" "Perl" "Phalcon" "PlayFramework" "Plone" "Prestashop" "Processing" "PureScript" "Python" "Qooxdoo" "Qt" "R" "ROS" "Rails" "Raku" "RhodesRhomobile" "Ruby" "Rust" "SCons" "Sass" "Scala" "Scheme" "Scrivener" "Sdcc" "SeamGen" "SketchUp" "Smalltalk" "Stella" "SugarCRM" "Swift" "Symfony" "SymphonyCMS" "TeX" "Terraform" "Textpattern" "TurboGears2" "TwinCAT3" "Typo3" "Unity" "UnrealEngine" "VVVV" "VisualStudio" "Waf" "WordPress" "Xojo" "Yeoman" "Yii" "ZendFramework" "Zephir" "SAM" "AltiumDesigner" "AutoIt" "B4X" "Bazel" "Beef" "InforCMS" "Kentico" "Umbraco" "core" "Phoenix" "Exercism" "GNOMEShellExtension" "Go.AllowList" "Hugo" "Gretl" "JBoss4" "JBoss6" "Cordova" "Meteor" "NWjs" "Vue" "LensStudio" "Snap" "Logtalk" "NasaSpecsIntact" "OpenSSL" "Bitrix" "CodeSniffer" "Drupal7" "Jigsaw" "Magento1" "Magento2" "Pimcore" "ThinkPHP" "Puppet" "JupyterNotebooks" "Nikola" "ROS2" "Racket" "Red" "SPFx" "Splunk" "Strapi" "V" "Xilinx" "AtmelStudio" "IAR_EWARM" "esp-idf" "uVision"))))
-
-(defun gh-repo-dirs-find-non-git-dirs ()
-  "Return list of non git directories in home directory."
-  (seq-remove (gh-repo--compose
-               'file-exists-p
-               (apply-partially
-                'expand-file-name ".git"))
-              (gh-repo-fdfind-find
-               `("~/" ,default-directory)
-               '("-t" "d" "--max-depth" "2"))))
-
-(defun gh-repo-find-non-git-dirs-up (&optional start-dir)
-  "Find non git directories starting at START-DIR."
-  (unless start-dir (setq start-dir default-directory))
-  (when-let ((dir (gh-repo-file-slash (expand-file-name start-dir))))
-    (let ((home-dir (expand-file-name "~/"))
-          (dirs)
-          (subdirs)
-          (stop))
-      (while (not (or (equal dir home-dir)
-                      stop))
-        (push dir dirs)
-        (setq subdirs
-              (seq-filter
-               'file-directory-p
-               (mapcar (gh-repo--rpartial 'expand-file-name dir)
-                       (delete "node_modules"
-                               (delete "." (delete ".."
-                                                   (directory-files dir)))))))
-        (setq stop (seq-find (gh-repo--compose 'file-exists-p
-                                          (apply-partially
-                                           'expand-file-name ".git"))
-                             subdirs))
-        (setq subdirs (seq-remove (gh-repo--compose
-                                   'file-exists-p
-                                   (apply-partially
-                                    'expand-file-name ".git"))
-                                  subdirs))
-        (setq dirs (append dirs subdirs))
-        (setq dir (gh-repo-file-slash (gh-repo-file-parent dir))))
-      dirs)))
 
 (defun gh-repo-guess-repos-dirs ()
   "Execute `fdfind' and return list parent directories of git repos."
@@ -617,7 +457,9 @@ Invoke CALLBACK without args."
         (funcall
          (gh-repo--compose
           #'delete-dups
-          (gh-repo--partial mapcar (gh-repo--compose #'gh-repo-file-parent #'gh-repo-file-parent))
+          (gh-repo--partial mapcar
+                            (gh-repo--compose #'gh-repo-file-parent
+                                              #'gh-repo-file-parent))
           (gh-repo--rpartial split-string "\n" t)
           #'shell-command-to-string
           (gh-repo--rpartial string-join "\s"))
@@ -637,8 +479,7 @@ Invoke CALLBACK without args."
 
 (defun gh-repo-read-dir (prompt basename)
   "Read directory with PROMPT and BASENAME."
-  (let* ((dir-files (gh-repo-directory-files default-directory))
-         (default-variants
+  (let* ((default-variants
           (mapcar
            (lambda (dir)
              (if (file-exists-p
@@ -647,7 +488,7 @@ Invoke CALLBACK without args."
                        (name basename))
                    (while (and (file-exists-p
                                 (expand-file-name name dir))
-                               (not (gh-repo-dir-empty-p
+                               (not (gh-repo-vc-dir-p
                                      (expand-file-name name dir))))
                      (setq count (1+ count))
                      (setq name (format "%s-%s"
@@ -657,28 +498,13 @@ Invoke CALLBACK without args."
                    (expand-file-name name dir))
                (expand-file-name basename dir)))
            (gh-repo-guess-repos-dirs)))
-         (variants (if (null dir-files)
+         (variants (if (null (gh-repo-vc-dir-p default-directory))
                        (append `(,default-directory) default-variants)
                      default-variants)))
     (file-name-as-directory
      (completing-read (or prompt "Directory:\s") variants nil nil
                       (gh-repo-file-parent
                        (car variants))))))
-
-;;;###autoload
-(defun gh-repo-create-read-clone-dir ()
-  "Read directory for cloning new repository."
-  (interactive)
-  (setq gh-repo--clone-dir
-        (cond ((stringp gh-repo--name)
-               (gh-repo-read-dir "--clone\s" gh-repo--name))
-              ((vc-root-dir)
-               (completing-read "--clone\s"
-                                (gh-repo-dirs-find-non-git-dirs)))
-              (t (completing-read "--clone\s"
-                                  (seq-uniq
-                                   (append (gh-repo-find-non-git-dirs-up)
-                                           (gh-repo-dirs-find-non-git-dirs))))))))
 
 ;;;###autoload
 (defun gh-repo-create-read-repo-name ()
@@ -701,8 +527,7 @@ Invoke CALLBACK without args."
     (when (or (null initial-input)
               (string-empty-p initial-input))
       (setq initial-input gh-repo--name))
-    (setq gh-repo--name (read-string "Name of repository:\s" initial-input))
-    (setq gh-repo--clone-dir (gh-repo-create-read-clone-dir))))
+    (setq gh-repo--name (read-string "Name of repository:\s" initial-input))))
 
 (defun gh-repo-generic-command ()
   "Make comamnds."
@@ -729,9 +554,7 @@ Invoke CALLBACK without args."
                             (equal value flag))
                        flag)
                       ((stringp value)
-                       (concat flag "\s" (if (string-match-p "[\s\t\t]" value)
-                                             (concat "\"" value "\"")
-                                           value)))
+                       (list flag value))
                       (t flag))))
                  vars))
     (setq flags (append flags (list
@@ -740,48 +563,30 @@ Invoke CALLBACK without args."
                                     (equal gh-repo--private t))
                                    "--private"
                                  "--public"))))
-    (when (and gh-repo--name gh-repo--clone-dir)
-      (string-join (append (list "gh repo create" gh-repo--name)
-                           (delete nil flags))
-                   "\s"))))
+    (when gh-repo--name
+      (flatten-list
+       (append `("gh" "repo" "create" ,gh-repo--name)
+               (delete nil flags))))))
+
+(defun gh-repo-create ()
+  "Create new gh repository and return t if success."
+  (when-let ((cmd (gh-repo-generic-command)))
+    (with-temp-buffer
+      (let ((status (apply 'call-process (car cmd) nil t nil (cdr cmd))))
+        (message (buffer-string))
+        (eq status 0)))))
 
 ;;;###autoload
 (defun gh-repo-create-repo ()
   "Create new repository with gh."
   (interactive)
-  (if (and gh-repo--clone-dir gh-repo--name)
-      (when-let ((command (read-string "Run:\s"
-                                       (string-join
-                                        (list (gh-repo-generic-command)
-                                              "&&"
-                                              "git clone"
-                                              (format "git@github.com:%s/%s"
-                                                      (gh-repo-get-current-user)
-                                                      gh-repo--name)
-                                              ".")
-                                        "\s"))))
-        (if-let* ((file (when (and buffer-file-name
-                                   (yes-or-no-p (format "Copy file %s to %s?"
-                                                        buffer-file-name
-                                                        gh-repo--clone-dir)))
-                          buffer-file-name))
-                  (target (expand-file-name (read-string
-                                             "Copy as %s"
-                                             (file-name-nondirectory file))
-                                            gh-repo--clone-dir)))
-            (gh-repo-exec-in-dir command
-                               gh-repo--clone-dir
-                               (lambda ()
-                                 (progn (copy-file file target)
-                                        (when (file-exists-p target)
-                                          (find-file target)))))
-          (gh-repo-exec-in-dir command
-                             gh-repo--clone-dir)))
-    (string-join
-     (delete nil (mapcar (lambda (it) (when (null (symbol-value it))
-                                   (format "%s is required " it)))
-                         '(gh-repo--name gh-repo--clone-dir)))
-     "\s")))
+  (while (null gh-repo--name)
+    (setq gh-repo--name (gh-repo-create-read-repo-name)))
+  (when (gh-repo-create)
+    (let ((name gh-repo--name))
+      (setq gh-repo--name nil)
+      (when (yes-or-no-p (format "Clone repo %s?" name))
+        (gh-repo-clone-repo name)))))
 
 (defun gh-repo-view-repo (repo)
   "View REPO in help buffer fontified with org mode or markdown mode.
@@ -792,7 +597,8 @@ Org mode detected by #+begin_ blocks."
              (concat "gh repo view " repo)
              (current-buffer)
              (current-buffer))
-            (let ((mode (if (re-search-forward (regexp-quote "#+begin_") nil t 1)
+            (let ((mode (if (re-search-forward
+                             (regexp-quote "#+begin_") nil t 1)
                             'org-mode
                           'markdown-mode)))
               (gh-repo-fontify (buffer-substring-no-properties
@@ -841,37 +647,6 @@ Each item is propertized with :type (private or public) and :description."
 (defvar gh-repo-repos-limit 50)
 (defvar gh-repo-user-repos nil)
 
-(defun gh-repo-git-get-ssh-variants (ssh-url)
-  "Return variants of git ssh for SSH-URL."
-  (let* ((local-alist (gh-repo-git-alist-ssh-hosts))
-         (cell (with-temp-buffer
-                 (save-excursion (insert (replace-regexp-in-string "^git@" ""
-                                                                   ssh-url)))
-                 (let ((beg (point))
-                       (end))
-                   (setq end (re-search-forward gh-repo-git-host-regexp nil t 1))
-                   (cons (buffer-substring-no-properties beg end)
-                         (string-trim (buffer-substring-no-properties
-                                       end
-                                       (point-max))))))))
-    (setq local-alist (seq-filter (lambda (it) (equal
-                                           (car cell)
-                                           (cdr it)))
-                                  local-alist))
-    (seq-uniq
-     (append
-      (list ssh-url)
-      (mapcar (lambda (it) (concat "git@" (car it) (cdr cell))) local-alist)))))
-
-(defun gh-repo-clone-confirm-url (url)
-  "Convert URL to ssh format and read it from minibuffer."
-  (let ((variants (gh-repo-git-get-ssh-variants
-                   (if (gh-repo-git-ssh-url-p url) url
-                     (gh-repo-git-url-https-to-ssh url)))))
-    (if (> (length variants) 1)
-        (completing-read "git clone\s" variants)
-      (car variants))))
-
 (defun gh-repo-annotate-repo (repo)
   "Fontify REPO :description text property depending on :type."
   (if-let* ((type  (gh-repos-get-prop repo :type))
@@ -885,17 +660,14 @@ Each item is propertized with :type (private or public) and :description."
     ""))
 
 ;;;###autoload
-(defun gh-repo-clone-repo (url)
-  "Clone repository at URL into TARGET-DIR or `gh-repo-download-default-repo-dir'."
+(defun gh-repo-clone-repo (name)
+  "Clone repository NAME into target-dir or `gh-repo-download-default-repo-dir'."
   (interactive)
-  (unless (string-match-p "^https://\\|ssh@" url)
-    (setq url (concat "https://github.com/" url)))
-  (if-let* ((repo-url (gh-repo-clone-confirm-url url))
-            (basename (file-name-base repo-url))
+  (if-let* ((basename (car (reverse (split-string name "/" t))))
             (project-dir (gh-repo-read-dir
                           (format "Clone %s to " basename) basename)))
       (let ((command (read-string "" (string-join
-                                      (list "git" "clone" repo-url
+                                      (list "gh" "repo" "clone" name
                                             project-dir)
                                       "\s"))))
         (setq project-dir (expand-file-name
@@ -1007,11 +779,11 @@ During minibuffer completion next commands are available:
 
 (defhydra gh-repo-hydra
   (:color pink :pre
-          (setq gh-repo-current-user (gh-repo-get-current-user)))
+          (unless gh-repo-current-user
+            (setq gh-repo-current-user (gh-repo-get-current-user))))
   "
 Create new repository options:
 _n_ ame                                %`gh-repo--name
-_c_ where to [c]lone                   %`gh-repo--clone-dir
 _u_ change [u]ser                      %`gh-repo-current-user
 _p_ [p]rivate or [p]ublic              %`gh-repo--private
 _P_ toggle --push                      %`gh-repo--push
@@ -1021,11 +793,10 @@ _I_ make [I]nternal                    %`gh-repo--internal
 _d_ description                        %`gh-repo--description
 _l_ specify license                    %`gh-repo--license
 _g_ specify [g]itignore template       %`gh-repo--gitignore
-_C_ run [C]ommand                      %(gh-repo-generic-command)
+_C_ run [C]ommand                      %(string-join (gh-repo-generic-command) \"\s\")
 _C->_ show all my repos
 "
   ("n" gh-repo-create-read-repo-name nil)
-  ("c" gh-repo-create-read-clone-dir nil)
   ("u" gh-repo-change-user nil)
   ("p" gh-repo--private-toggle nil)
   ("P" gh-repo--push-toggle nil)
@@ -1035,7 +806,7 @@ _C->_ show all my repos
   ("d" gh-repo--description-read nil)
   ("l" gh-repo-read-license nil)
   ("g" gh-repo-read-gitignore-read nil)
-  ("C" gh-repo-create-repo nil)
+  ("C" gh-repo-create-repo nil :exit t)
   ("C->" gh-repo-read-user-repo nil :exit t)
   ("q" nil "quit"))
 
