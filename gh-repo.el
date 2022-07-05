@@ -1,4 +1,4 @@
-;;; gh-repo.el --- Create and manage gh repositories. -*- lexical-binding: t -*-
+;;; gh-repo.el --- Create and manage gh repositories -*- lexical-binding: t -*-
 
 ;; Copyright © 2020-2022 Karim Aziiev <karim.aziiev@gmail.com>
 
@@ -190,7 +190,7 @@ ITEM can be propertized string or plist."
         (when new
           (setcdr last new)
           (setq last (cdr new)))))
-    (apply 'propertize string (cdr result))))
+    (apply #'propertize string (cdr result))))
 
 (defun gh-repo-file-parent (path)
   "Return the parent directory to PATH without slash."
@@ -450,7 +450,7 @@ Invoke CALLBACK without args."
 (defun gh-repo-guess-repos-dirs ()
   "Execute `fdfind' and return list parent directories of git repos."
   (or
-   (let ((command (seq-find 'executable-find
+   (let ((command (seq-find #'executable-find
                             '("fdfind" "fd" "find"))))
      (pcase command
        ((or "fd" "fdfind")
@@ -572,7 +572,7 @@ Invoke CALLBACK without args."
   "Create new gh repository and return t if success."
   (when-let ((cmd (gh-repo-generic-command)))
     (with-temp-buffer
-      (let ((status (apply 'call-process (car cmd) nil t nil (cdr cmd))))
+      (let ((status (apply #'call-process (car cmd) nil t nil (cdr cmd))))
         (message (buffer-string))
         (eq status 0)))))
 
@@ -639,7 +639,7 @@ Each item is propertized with :type (private or public) and :description."
             (gh-repo-exec (if flags
                          (concat "gh repo list "
                                  (mapconcat
-                                  (apply-partially 'format "%s")
+                                  (apply-partially #'format "%s")
                                   flags "\s"))
                        "gh repo list"))
             "\n"))))
