@@ -54,19 +54,22 @@ Download repository and it to your load path in your init file:
 
 Hydra for creating and configuring new repository.
 
-| Key | Description                               |
-|-----+-------------------------------------------|
-| n   | name for new repository                   |
-| u   | change gh user                            |
-| p   | toggle visibility (--private or --public) |
-| P   | toggle --push                             |
-| w   | disable wiki                              |
-| i   | disable issues                            |
-| I   | make new repository internal              |
-| d   | specify description for repository        |
-| l   | specify Open Source license               |
-| g   | specify gitignore template                |
-| C   | create repository with current options    |
+| Key | Description                                                           |
+|-----+-----------------------------------------------------------------------|
+| n   | name for new repository                                               |
+| u   | change gh user                                                        |
+| p   | toggle visibility (--private or --public)                             |
+| P   | toggle --push                                                         |
+| w   | disable wiki                                                          |
+| i   | disable issues                                                        |
+| I   | make new repository internal                                          |
+| d   | specify description for repository                                    |
+| l   | specify Open Source license                                           |
+| g   | specify gitignore template                                            |
+| C   | create repository with current options                                |
+| t   | set options from saved templates (see ~gh-repo-predefined-templates~) |
+| s   | save current options for future settings                              |
+
 
 + ~gh-repo-read-user-repo~
 Read user repository and prompt and execute one of the action from ~gh-repo-actions~. During minibuffer completion next commands are available:
@@ -115,8 +118,12 @@ Your action should accept one argument - repository name. For example
 (add-to-list 'gh-repo-actions '(?o "open in browser" my-gh-action))
 #+end_src
 
-+ ~gh-repo-download-default-repo-dir~
-Default directory for downloading and cloning repositories.
++ ~gh-repo-default-repos-limit~
+
+Initial value for maximum number of repositories to load during minibuffer completion with ~gh-repo-read-user-repo~.
+
++ ~gh-repo-predefined-templates~
+Alist of template names and saved options. To use some template call command ~gh-repo-use-predefined-template~.
 
 + ~gh-repo-default-license~
 Default repository license for new repositories.
