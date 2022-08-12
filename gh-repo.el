@@ -1005,7 +1005,7 @@ Return plist with it's options."
   (when (and flag
              value
              (not (string-empty-p value)))
-    (list "-f" value)))
+    (list flag value)))
 
 (defun gh-repo-gist-get-create-args ()
   "Generate gist command."
