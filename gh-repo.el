@@ -36,6 +36,9 @@
 (require 'request)
 (require 'auth-source)
 
+(eval-when-compile
+  (require 'subr-x))
+
 (defcustom gh-repo-default-license "gpl-3.0"
   "Default repository license."
   :type 'string
@@ -66,15 +69,18 @@ It just initial value and can be changed dynamically in minibuffer:
     "AppceleratorTitanium" "ArchLinuxPackages" "Autotools" "C++" "C" "CFWheels"
     "CMake" "CUDA" "CakePHP" "ChefCookbook" "Clojure" "CodeIgniter" "CommonLisp"
     "Composer" "Concrete5" "Coq" "CraftCMS" "D" "DM" "Dart" "Delphi" "Drupal"
-    "EPiServer" "Eagle" "Elisp" "Elixir" "Elm" "Erlang" "ExpressionEngine" "ExtJs"
+    "EPiServer" "Eagle" "Elisp" "Elixir" "Elm" "Erlang" "ExpressionEngine"
+    "ExtJs"
     "Fancy" "Finale" "FlaxEngine" "ForceDotCom" "Fortran" "FuelPHP" "GWT" "Gcov"
-    "GitBook" "AL" "Anjuta" "Ansible" "Archives" "Backup" "Bazaar" "BricxCC" "CVS"
+    "GitBook" "AL" "Anjuta" "Ansible" "Archives" "Backup" "Bazaar" "BricxCC"
+    "CVS"
     "Calabash" "Cloud9" "CodeKit" "DartEditor" "Diff" "Dreamweaver" "Dropbox"
     "Eclipse" "EiffelStudio" "Emacs" "Ensime" "Espresso" "FlexBuilder" "GPG"
     "Images" "JDeveloper" "JEnv" "JetBrains" "KDevelop4" "Kate" "Lazarus"
     "LibreOffice" "Linux" "LyX" "MATLAB" "Mercurial" "Metals" "MicrosoftOffice"
     "ModelSim" "Momentics" "MonoDevelop" "NetBeans" "Ninja" "NotepadPP" "Octave"
-    "Otto" "PSoCCreator" "Patch" "PuTTY" "Redcar" "Redis" "SBT" "SVN" "SlickEdit"
+    "Otto" "PSoCCreator" "Patch" "PuTTY" "Redcar" "Redis" "SBT" "SVN"
+    "SlickEdit"
     "Stata" "SublimeText" "Syncthing" "SynopsysVCS" "Tags" "TextMate"
     "TortoiseGit" "Vagrant" "Vim" "VirtualEnv" "Virtuoso" "VisualStudioCode"
     "WebMethods" "Windows" "Xcode" "XilinxISE" "macOS" "Go" "Godot" "Gradle"
@@ -84,17 +90,22 @@ It just initial value and can be changed dynamically in minibuffer:
     "MetaProgrammingSystem" "Nanoc" "Nim" "Node" "OCaml" "Objective-C" "Opa"
     "OpenCart" "OracleForms" "Packer" "Perl" "Phalcon" "PlayFramework" "Plone"
     "Prestashop" "Processing" "PureScript" "Python" "Qooxdoo" "Qt" "R" "ROS"
-    "Rails" "Raku" "RhodesRhomobile" "Ruby" "Rust" "SCons" "Sass" "Scala" "Scheme"
+    "Rails" "Raku" "RhodesRhomobile" "Ruby" "Rust" "SCons" "Sass" "Scala"
+    "Scheme"
     "Scrivener" "Sdcc" "SeamGen" "SketchUp" "Smalltalk" "Stella" "SugarCRM"
-    "Swift" "Symfony" "SymphonyCMS" "TeX" "Terraform" "Textpattern" "TurboGears2"
+    "Swift" "Symfony" "SymphonyCMS" "TeX" "Terraform" "Textpattern"
+    "TurboGears2"
     "TwinCAT3" "Typo3" "Unity" "UnrealEngine" "VVVV" "VisualStudio" "Waf"
     "WordPress" "Xojo" "Yeoman" "Yii" "ZendFramework" "Zephir" "SAM"
-    "AltiumDesigner" "AutoIt" "B4X" "Bazel" "Beef" "InforCMS" "Kentico" "Umbraco"
+    "AltiumDesigner" "AutoIt" "B4X" "Bazel" "Beef" "InforCMS" "Kentico"
+    "Umbraco"
     "core" "Phoenix" "Exercism" "GNOMEShellExtension" "Go.AllowList" "Hugo"
-    "Gretl" "JBoss4" "JBoss6" "Cordova" "Meteor" "NWjs" "Vue" "LensStudio" "Snap"
+    "Gretl" "JBoss4" "JBoss6" "Cordova" "Meteor" "NWjs" "Vue" "LensStudio"
+    "Snap"
     "Logtalk" "NasaSpecsIntact" "OpenSSL" "Bitrix" "CodeSniffer" "Drupal7"
     "Jigsaw" "Magento1" "Magento2" "Pimcore" "ThinkPHP" "Puppet"
-    "JupyterNotebooks" "Nikola" "ROS2" "Racket" "Red" "SPFx" "Splunk" "Strapi" "V"
+    "JupyterNotebooks" "Nikola" "ROS2" "Racket" "Red" "SPFx" "Splunk" "Strapi"
+    "V"
     "Xilinx" "AtmelStudio" "IAR_EWARM" "esp-idf" "uVision"))
 
 (defvar gh-repo-options
@@ -118,18 +129,22 @@ It just initial value and can be changed dynamically in minibuffer:
            (gh-repo--description (string :tag "Description"))
            (gh-repo--license
             (radio (const :tag "GNU General Public License v3.0" "gpl-3.0")
-                   (const :tag"GNU Affero General Public License v3.0" "agpl-3.0")
+                   (const :tag"GNU Affero General Public License v3.0"
+                          "agpl-3.0")
                    (const :tag "Apache License 2.0" "apache-2.0")
-                   (const :tag "BSD 2-Clause \"Simplified\" License" "bsd-2-clause")
-                   (const :tag "BSD 3-Clause \"New\" or \"Revised\" License" "bsd-3-clause")
+                   (const :tag "BSD 2-Clause \"Simplified\" License"
+                          "bsd-2-clause")
+                   (const :tag "BSD 3-Clause \"New\" or \"Revised\" License"
+                          "bsd-3-clause")
                    (const :tag "Boost Software License 1.0" "bsl-1.0")
                    (const :tag "Creative Commons Zero v1.0 Universal" "cc0-1.0")
                    (const :tag "Eclipse Public License 2.0" "epl-2.0")
                    (const :tag "GNU General Public License v2.0" "gpl-2.0")
-                   (const :tag "GNU Lesser General Public License v2.1" "lgpl-2.1")
+                   (const :tag "GNU Lesser General Public License v2.1"
+                          "lgpl-2.1")
                    (const :tag "MIT License" "mit")
                    (const :tag "Mozilla Public License 2.0" "mpl-2.0")
-                   (const :tag "The Unlicense" "unlicense")))pl
+                   (const :tag "The Unlicense" "unlicense")))
            (gh-repo--gitignore (radio
                                 ,@(mapcar (lambda (it) `(const ,it ,it))
                                           gh-repo-gitignores))))))
@@ -459,15 +474,17 @@ Invoke CALLBACK without args."
                (auth-source-search
                 :host "api.github.com"
                 :max most-positive-fixnum)
-               (lambda (a b) (equal (auth-info-password a)
-                               (auth-info-password b))))))
+               (lambda (a b)
+                 (equal (auth-info-password a)
+                        (auth-info-password b))))))
     (auth-info-password
      (car (auth-source-search
            :host "api.github.com"
            :user (completing-read
                   "Source:\s"
                   (mapcar
-                   (lambda (it) (plist-get it :user))
+                   (lambda (it)
+                     (plist-get it :user))
                    variants)
                   nil t))))))
 
@@ -734,21 +751,22 @@ Each item is propertized with :type (private or public) and :description."
   (setq flags (delete nil (flatten-list flags)))
   (delete nil
           (mapcar
-           (lambda (it) (let ((parts (split-string it))
-                         (name))
-                     (when (setq name (pop parts))
-                       (gh-repo-add-props
-                        name :description (string-join parts " - ")
-                        :type (if (member "private" parts)
-                                  "private"
-                                "public")))))
+           (lambda (it)
+             (when-let* ((parts (split-string it nil t))
+                         (name (pop parts)))
+               (gh-repo-add-props
+                name
+                :description (substring-no-properties it (length name))
+                :type (if (member "private" parts)
+                          "private"
+                        "public"))))
            (split-string
             (gh-repo-exec (if flags
-                         (concat "gh repo list "
-                                 (mapconcat
-                                  (apply-partially #'format "%s")
-                                  flags "\s"))
-                       "gh repo list"))
+                              (concat "gh repo list "
+                                      (mapconcat
+                                       (apply-partially #'format "%s")
+                                       flags "\s"))
+                            "gh repo list"))
             "\n"))))
 
 (defvar gh-repo-repos-limit gh-repo-default-repos-limit)
@@ -783,10 +801,11 @@ Each item is propertized with :type (private or public) and :description."
     (message "Cannot clone")))
 
 (defun gh-repo-remove (repo)
-	"Ask user a \"y or n\" question and remove gh REPO if y."
+  "Ask user a \"y or n\" question and remove gh REPO if y."
   (when (and (stringp repo)
              (not (string-empty-p (string-trim repo)))
              (yes-or-no-p (format "Remove %s?" repo)))
+    (gh-repo-call-process "gh" "auth" "refresh" "-s" "delete_repo")
     (message (shell-command-to-string
               (concat "gh repo delete "
                       repo
@@ -852,7 +871,8 @@ If ACTION is nil read it from `gh-repo-actions'.
 
 During minibuffer completion next commands are available:
 
-\\<gh-repo-minibuffer-map>\ `\\[gh-repo-change-repos-limit]' - to change number of displayed repositories,
+\\<gh-repo-minibuffer-map>\ `\\[gh-repo-change-repos-limit]' -
+to change number of displayed repositories,
 `\\[gh-repo-switch-to-hydra]' switch to hydra."
   (interactive)
   (setq gh-repo-current-user (or gh-repo-current-user
@@ -972,9 +992,10 @@ Return plist with it's options."
   "Read multiple filenames."
   (let ((choices)
         (dir)
-        (initial-file-name (when buffer-file-name
-                             (gh-repo--file-name-base-with-ext
-                              buffer-file-name)))
+        (initial-file-name
+         (when buffer-file-name
+           (gh-repo--file-name-base-with-ext
+            buffer-file-name)))
         (curr))
     (catch 'done
       (while (setq curr
@@ -988,9 +1009,11 @@ Return plist with it's options."
                             map)))
                      (read-file-name
                       (concat "File:\s"
-                              (substitute-command-keys "(`\\<gh-repo-gist-completing-read-files-map>\
+                              (substitute-command-keys
+                               "(`\\<gh-repo-gist-completing-read-files-map>\
 \\[gh-repo-gist-throw-done]' to finish)\s")
-                              (mapconcat #'gh-repo--file-name-base-with-ext choices "\s")
+                              (mapconcat #'gh-repo--file-name-base-with-ext
+                                         choices "\s")
                               "\s")
                       dir nil t initial-file-name)))
         (setq initial-file-name nil)
@@ -1034,10 +1057,11 @@ Return plist with it's options."
                            (point-min)
                            (point-max)
                            "gh" t t nil
-                           (flatten-list (list "gist"
-                                               "create"
-                                               (delq nil
-                                                     (gh-repo-gist-get-create-args)))))))
+                           (flatten-list
+                            (list "gist"
+                                  "create"
+                                  (delq nil
+                                        (gh-repo-gist-get-create-args)))))))
         (if (eq 0 status)
             (gh-repo-gist-reset-args)
           (minibuffer-message (buffer-string)))))))
@@ -1069,9 +1093,10 @@ Return plist with it's options."
   "Read gists in minibuffer and return gist id."
   (let* ((gists (with-temp-buffer
                   (when (eq 0 (call-process "gh" nil t nil "gist" "list"))
-                    (mapcar (lambda (it) (gh-repo-add-props it
-                                                       :props
-                                                       (gh-repo-gist-to-props it)))
+                    (mapcar (lambda (it)
+                              (gh-repo-add-props it
+                                                 :props
+                                                 (gh-repo-gist-to-props it)))
                             (split-string (buffer-string) "\n" t)))))
          (result (completing-read "gists" gists)))
     (or (gh-repo-get-prop result :props) result)))
