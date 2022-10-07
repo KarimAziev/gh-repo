@@ -6,7 +6,7 @@
 ;; URL: https://github.com/KarimAziev/gh-repo
 ;; Keywords: lisp, vc, tools
 ;; Version: 0.3.0
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "27.1") (hydra "0.15.0") (request "0.3.0"))
 
 ;; This file is NOT part of GNU Emacs.
 
@@ -173,6 +173,9 @@ ACTION is a a function which should accept one argument
                 :value-type (list (string :tag "Label" :value "<description>")
                                   (function :tag "Function")))
   :group 'gh-repo)
+
+(defvar gh-repo-after-create-repo-hook nil
+  "List of hooks to run after cloning new repository.")
 
 (defmacro gh-repo--pipe (&rest functions)
   "Return left-to-right composition from FUNCTIONS."
@@ -435,7 +438,7 @@ Invoke CALLBACK without args."
                       (if callback
                           (funcall callback)
                         (dired project-dir)))
-                  (user-error (format "%s\n%s" command output))))))
+                  (user-error "%s\n%s" command output)))))
            (when (fboundp 'comint-output-filter)
              (set-process-filter proc #'comint-output-filter)))))
 
@@ -467,6 +470,13 @@ Invoke CALLBACK without args."
       (when (eq 0 status)
         (gh-repo-get-current-user)))))
 
+(defun gh-repo-auth-info-password (auth-info)
+  "Return secret from AUTH-INFO."
+  (let ((secret (plist-get auth-info :secret)))
+    (if (functionp secret)
+        (funcall secret)
+      secret)))
+
 (defun gh-repo-read-token ()
   "Search for gh token in `auth-sources'."
   (when-let ((variants
@@ -475,9 +485,9 @@ Invoke CALLBACK without args."
                 :host "api.github.com"
                 :max most-positive-fixnum)
                (lambda (a b)
-                 (equal (auth-info-password a)
-                        (auth-info-password b))))))
-    (auth-info-password
+                 (equal (gh-repo-auth-info-password a)
+                        (gh-repo-auth-info-password b))))))
+    (gh-repo-auth-info-password
      (car (auth-source-search
            :host "api.github.com"
            :user (completing-read
@@ -700,6 +710,10 @@ Invoke CALLBACK without args."
   (when-let ((cmd (gh-repo-generic-command)))
     (gh-repo-call-process (car cmd) (cdr cmd))))
 
+(defun gh-repo-command-hint ()
+  "Return hint with current gh repo command."
+  (string-join (gh-repo-generic-command) "\s"))
+
 ;;;###autoload
 (defun gh-repo-create-repo ()
   "Create new repository with gh."
@@ -797,8 +811,11 @@ Each item is propertized with :type (private or public) and :description."
                                       "\s"))))
         (setq project-dir (expand-file-name
                            (car (reverse (split-string command)))))
-        (gh-repo-exec-in-dir command project-dir))
-    (message "Cannot clone")))
+        (gh-repo-exec-in-dir command project-dir)
+        (when (file-exists-p project-dir)
+          (let ((default-directory project-dir))
+            (run-hooks 'gh-repo-after-create-repo-hook))))
+    (message "Cannot clone %s" name)))
 
 (defun gh-repo-remove (repo)
   "Ask user a \"y or n\" question and remove gh REPO if y."
@@ -958,28 +975,6 @@ Return plist with it's options."
     (dolist (var vars)
       (set var (plist-get pl var)))))
 
-(defvar gh-repo-gist-list-buffer "*gh-repo-gist-list*")
-(defvar gh-repo-gist-view-buffer "*gh-repo-gist-view*")
-(gh-repo-defun-var-toggler gh-repo-gist--public gh-repo-gist--toggle-public)
-
-(defvar gh-repo-gist--description nil)
-(defvar gh-repo-gist--filename nil)
-
-(defun gh-repo-gist-throw-done ()
-  "Throw to the catch for done and return nil from it."
-  (interactive)
-  (throw 'done nil))
-
-(defvar gh-repo-gist-completing-read-files-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map
-                (kbd "C-<return>")
-                'gh-repo-gist-throw-done)
-    (define-key map (kbd "C-M-j")
-                'gh-repo-gist-throw-done)
-    map)
-  "Keymap used in `gh-repo-gist-completing-read-files'.")
-
 (defun gh-repo--file-name-base-with-ext (file)
   "Return the base name of the FILE but with extension."
   (if-let ((ext (file-name-extension file)))
@@ -988,41 +983,6 @@ Return plist with it's options."
               ext)
     (file-name-base file)))
 
-(defun gh-repo-gist-completing-read-files ()
-  "Read multiple filenames."
-  (let ((choices)
-        (dir)
-        (initial-file-name
-         (when buffer-file-name
-           (gh-repo--file-name-base-with-ext
-            buffer-file-name)))
-        (curr))
-    (catch 'done
-      (while (setq curr
-                   (minibuffer-with-setup-hook
-                       (lambda ()
-                         (use-local-map
-                          (let ((map (copy-keymap
-                                      gh-repo-gist-completing-read-files-map)))
-                            (set-keymap-parent map
-                                               (current-local-map))
-                            map)))
-                     (read-file-name
-                      (concat "File:\s"
-                              (substitute-command-keys
-                               "(`\\<gh-repo-gist-completing-read-files-map>\
-\\[gh-repo-gist-throw-done]' to finish)\s")
-                              (mapconcat #'gh-repo--file-name-base-with-ext
-                                         choices "\s")
-                              "\s")
-                      dir nil t initial-file-name)))
-        (setq initial-file-name nil)
-        (if (file-directory-p curr)
-            (setq dir curr)
-          (setq choices (append choices (list curr)))
-          (setq dir (gh-repo-file-parent curr)))))
-    choices))
-
 (defun gh-repo-flag-if-non-empty (flag value)
   "Return list with FLAG and VALUE if VALUE is non-empty string."
   (when (and flag
@@ -1030,225 +990,14 @@ Return plist with it's options."
              (not (string-empty-p value)))
     (list flag value)))
 
-(defun gh-repo-gist-get-create-args ()
-  "Generate gist command."
-  (let ((descr (gh-repo-flag-if-non-empty "-d" gh-repo-gist--description))
-        (file (gh-repo-flag-if-non-empty "-f" gh-repo-gist--filename))
-        (public (when gh-repo-gist--public (list "--public"))))
-    (append public file descr)))
+(defhydra gh-repo-hydra (:color pink
+                                :pre
+                                (progn
+                                  (unless gh-repo-current-user
+                                    (setq gh-repo-current-user
+                                          (gh-repo-get-current-user)))))
+  (concat "\n" "Create new repository options.
 
-;;;###autoload
-(defun gh-repo-gist-reset-args ()
-  "Reset gist create args."
-  (interactive)
-  (setq gh-repo-gist--description nil)
-  (setq gh-repo-gist--filename nil)
-  (setq gh-repo-gist--public nil))
-
-;;;###autoload
-(defun gh-repo-gist-create-from-region (beg end)
-  "Create gh gist with NAME from current region between BEG and END."
-  (interactive "r")
-  (let ((content (buffer-substring-no-properties beg end)))
-    (with-temp-buffer
-      (erase-buffer)
-      (insert content)
-      (let ((status (apply #'call-process-region
-                           (point-min)
-                           (point-max)
-                           "gh" t t nil
-                           (flatten-list
-                            (list "gist"
-                                  "create"
-                                  (delq nil
-                                        (gh-repo-gist-get-create-args)))))))
-        (if (eq 0 status)
-            (gh-repo-gist-reset-args)
-          (minibuffer-message (buffer-string)))))))
-
-;;;###autoload
-(defun gh-repo-gist-from-region-or-buffer ()
-  "Create gh gist from active region or current buffer."
-  (interactive)
-  (apply #'gh-repo-gist-create-from-region
-         (if (region-active-p)
-             (list (region-beginning) (region-end))
-           (list (point-min) (point-max)))))
-
-;;;###autoload
-(defun gh-repo-gist-from-files ()
-  "Read files and create gists."
-  (interactive)
-  (let ((files (gh-repo-gist-completing-read-files)))
-    (when (gh-repo-call-process "gh"
-                                (delq nil
-                                      (append '("gist"
-                                                "create")
-                                              files
-                                              (gh-repo-gist-get-create-args))))
-      (gh-repo-gist-reset-args)
-      (gh-repo-gist-view-gist-file))))
-
-(defun gh-repo-read-gist ()
-  "Read gists in minibuffer and return gist id."
-  (let* ((gists (with-temp-buffer
-                  (when (eq 0 (call-process "gh" nil t nil "gist" "list"))
-                    (mapcar (lambda (it)
-                              (gh-repo-add-props it
-                                                 :props
-                                                 (gh-repo-gist-to-props it)))
-                            (split-string (buffer-string) "\n" t)))))
-         (result (completing-read "gists" gists)))
-    (or (gh-repo-get-prop result :props) result)))
-
-(defun gh-repo-gist-to-props (gist)
-  "Convert GIST to plist."
-  (let ((parts (split-string gist nil t))
-        (id))
-    (setq id (pop parts))
-    (setq parts (reverse parts))
-    (let* ((date (pop parts))
-           (type (pop parts))
-           (files-count
-            (let ((f (pop parts)))
-              (setq f (if (member f '("files" "file"))
-                          (pop parts)
-                        f))
-              (when (string-match-p "^[0-9]+$" f)
-                (string-to-number f))))
-           (description (string-join (reverse parts) "\s")))
-      (list :id id
-            :description description
-            :type type
-            :files-count files-count
-            :date date))))
-
-;;;###autoload
-(defun gh-repo-gist-view-gist-file (&optional gist)
-  "View GIST in help buffer fontified with org mode or markdown mode."
-  (interactive)
-  (unless gist (setq gist (gh-repo-read-gist)))
-  (let* ((id (if (stringp gist) gist (plist-get gist :id)))
-         (files (split-string
-                 (gh-repo-call-process "gh" "gist" "view" id
-                                       "--files")
-                 "[\n]" t))
-         (file (if (= (length files) 1)
-                   (car files)
-                 (completing-read "File:\s" files)))
-         (body (gh-repo-call-process "gh" "gist" "view" id "-f" file))
-         (buffer (with-current-buffer
-                     (get-buffer-create gh-repo-gist-view-buffer)
-                   (let ((inhibit-read-only t))
-                     (erase-buffer)
-                     (save-excursion
-                       (insert body)))
-                   (let ((buffer-file-name (expand-file-name file)))
-                     (delay-mode-hooks (set-auto-mode)
-                                       (font-lock-ensure)))
-                   (setq header-line-format
-                         (string-join
-                          (delq nil (list id file))
-                          "\s"))
-                   (current-buffer))))
-    (unless (memq buffer
-                  (mapcar #'window-buffer
-                          (window-list)))
-      (pop-to-buffer buffer t))))
-
-(defun gh-repo--gist-delete (gist-id)
-  "Remove gist with GIST-ID."
-  (gh-repo-exec-async (concat "gh gist delete " gist-id)
-                      (lambda (&rest _ignored)
-                        (message "Deleted gist %s" gist-id))))
-
-(defun gh-repo-exec-async (command &optional callback)
-  "Execute COMMAND with CALLBACK.
-IF CALLBACK is nil, display buffer with output."
-  (let ((proc)
-        (buffer (generate-new-buffer (format "*%s*" command))))
-    (progn
-      (with-current-buffer buffer
-        (setq proc (start-process-shell-command
-                    (nth 0
-                         (split-string command))
-                    buffer command))
-        (shell-command-save-pos-or-erase)
-        (require 'shell)
-        (when (fboundp 'shell-mode)
-          (shell-mode)))
-      (set-process-sentinel
-       proc
-       (lambda (process _state)
-         (let ((output (with-current-buffer
-                           (process-buffer process)
-                         (buffer-substring-no-properties (point-min)
-                                                         (point-max)))))
-           (kill-buffer (process-buffer process))
-           (if (= (process-exit-status process) 0)
-               (progn
-                 (if callback
-                     (progn (kill-buffer buffer)
-                            (funcall callback
-                                     output))
-                   (pop-to-buffer (current-buffer))))
-             (user-error (format "%s\n%s" command output))))))
-      (require 'comint)
-      (when (fboundp 'comint-output-filter)
-        (set-process-filter proc #'comint-output-filter)))))
-
-;;;###autoload
-(defun gh-repo-gist-delete (&optional gist)
-  "Delete GIST."
-  (interactive)
-  (unless gist (setq gist (gh-repo-read-gist)))
-  (when-let ((id (if (stringp gist) gist (plist-get gist :id))))
-    (gh-repo--gist-delete id)))
-
-(defun gh-repo-gist-files (gist)
-  "Load files of GIST."
-  (when-let ((output (gh-repo-call-process "gh" "gist" "view" gist
-                                           "--files")))
-    (split-string output "[\n]" t)))
-
-;;;###autoload
-(defun gh-repo-gist-edit (&optional gist)
-  "Edit GIST."
-  (interactive)
-  (unless gist (setq gist (gh-repo-read-gist)))
-  (when-let* ((id (if (stringp gist) gist (plist-get gist :id)))
-              (files (split-string
-                      (gh-repo-call-process "gh" "gist" "view" id
-                                            "--files")
-                      "[\n]" t))
-              (file (if (= (length files) 1)
-                        (car files)
-                      (completing-read "File:\s" files))))
-    (gh-repo-exec-async (concat "gh gist edit " id " --filename " file))))
-
-(defun gh-repo-gist-edit-file (id &optional file)
-  "Edit gist FILE with ID."
-  (when-let ((output (gh-repo-call-process "gh" "gist" "edit" id file)))
-    (split-string output "[\n]" t)))
-
-;;;###autoload
-(defun gh-repo-gist-clone-gist (&optional gist)
-  "Read target directory from minibuffer and clone GIST."
-  (interactive)
-  (unless gist (setq gist (gh-repo-read-gist)))
-  (let* ((project-dir (read-directory-name "Directory:\s"))
-         (command (read-string "" (string-join
-                                   (list "gh" "gist" "clone"
-                                         project-dir)
-                                   "\s"))))
-    (gh-repo-exec-in-dir command project-dir)))
-
-(defhydra gh-repo-hydra
-  (:color pink :pre
-          (unless gh-repo-current-user
-            (setq gh-repo-current-user (gh-repo-get-current-user))))
-  "
-Create new repository options:
 _n_ ame                                %`gh-repo--name
 _u_ change [u]ser                      %`gh-repo-current-user
 _p_ [p]rivate or [p]ublic              %`gh-repo--private
@@ -1260,18 +1009,15 @@ _d_ description                        %`gh-repo--description
 _l_ specify license                    %`gh-repo--license
 _g_ specify [g]itignore template       %`gh-repo--gitignore
 
-_C_ run [C]ommand                      %(string-join (gh-repo-generic-command) \"\s\")
+_C_ run [C]ommand                      %(gh-repo-command-hint)
 
 Saved options:
 _t_ use [t]emplate                     set options from saved template
 _s_ [s]ave current options             save current options for future settings
 
-Gists
-_G_ switch to gists
 
 Existing repositories:
-_C->_ show all my repos
-"
+_C->_ show all my repos")
   ("n" gh-repo-create-read-repo-name nil)
   ("u" gh-repo-change-user nil)
   ("p" gh-repo--private-toggle nil)
@@ -1285,51 +1031,7 @@ _C->_ show all my repos
   ("C" gh-repo-create-repo nil :exit t)
   ("t" gh-repo-use-predefined-template nil)
   ("s" gh-repo-save-current-options nil)
-  ("G" gh-repo-gist-hydra/body nil :exit t)
   ("C->" gh-repo-read-user-repo nil :exit t)
-  ("q" nil "quit"))
-
-(defhydra gh-repo-gist-hydra
-  (:color pink :pre
-          (unless gh-repo-current-user
-            (setq gh-repo-current-user (gh-repo-get-current-user))))
-  "
-_u_ change [u]ser                      %`gh-repo-current-user
-
-_f_ file                               %`gh-repo-gist--filename
-_p_ [p]ublic                           %`gh-repo-gist--public
-_d_ description                        %`gh-repo-gist--description
-
-Add gist
-_b_ from buffer or region              %(string-join (gh-repo-gist-get-create-args) \"\s\")
-_F_ gist from files                    %(string-join (gh-repo-gist-get-create-args) \"\s\")
-
-_r_ reset
-
-Existing gists
-_v_ view
-_e_ edit
-_D_ delete
-_c_ clone
-
-_l_ hydra repos
-"
-  ("u" gh-repo-change-user nil)
-  ("f" (setq gh-repo-gist--filename
-             (read-string "Filename: " gh-repo-gist--filename))
-   nil)
-  ("p" gh-repo-gist--toggle-public nil)
-  ("d" (setq gh-repo-gist--description
-             (read-string "Description: " gh-repo-gist--description))
-   nil)
-  ("F" gh-repo-gist-from-files nil :exit t)
-  ("b" gh-repo-gist-from-region-or-buffer nil :exit t)
-  ("r" gh-repo-gist-reset-args nil)
-  ("v" gh-repo-gist-view-gist-file nil :exit t)
-  ("e" gh-repo-gist-edit nil :exit t)
-  ("D" gh-repo-gist-delete nil :exit t)
-  ("c" gh-repo-gist-clone-gist nil :exit t)
-  ("l" gh-repo-hydra/body nil :exit t)
   ("q" nil "quit"))
 
 (provide 'gh-repo)
