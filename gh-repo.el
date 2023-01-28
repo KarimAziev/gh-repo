@@ -45,9 +45,12 @@
   :group 'gh-repo)
 
 (defcustom gh-repo-download-default-repo-dir "~/"
-  "Default directory for downloading and cloning repositories."
+  "Default directory to use when `gh-repo' reads destination."
   :group 'gh-repo
-  :type 'directory)
+  :type '(radio (repeat
+                 :tag "Directory list"
+                 :value ("~/") directory)
+                (directory :tag "Directory")))
 
 (defvar gh-repo-minibuffer-map
   (let ((map (make-sparse-keymap)))
@@ -177,50 +180,6 @@ ACTION is a a function which should accept one argument
 (defvar gh-repo-after-create-repo-hook nil
   "List of hooks to run after cloning new repository.")
 
-(defmacro gh-repo--pipe (&rest functions)
-  "Return left-to-right composition from FUNCTIONS."
-  (declare (debug t) (pure t) (side-effect-free t))
-  `(lambda (&rest args)
-     ,@(let ((init-fn (pop functions)))
-         (list
-          (seq-reduce
-           (lambda (acc fn)
-             (if (symbolp fn)
-                 `(funcall #',fn ,acc)
-               `(funcall ,fn ,acc)))
-           functions
-           (if (symbolp init-fn)
-               `(apply #',init-fn args)
-             `(apply ,init-fn args)))))))
-
-(defmacro gh-repo--rpartial (fn &rest args)
-  "Return a partial application of FN to right-hand ARGS.
-
-ARGS is a list of the last N arguments to pass to FN. The result is a new
-function which does the same as FN, except that the last N arguments are fixed
-at the values with which this function was called."
-  (declare (side-effect-free t))
-  `(lambda (&rest pre-args)
-     ,(car (list (if (symbolp fn)
-                     `(apply #',fn (append pre-args (list ,@args)))
-                   `(apply ,fn (append pre-args (list ,@args))))))))
-
-(defmacro gh-repo--partial (fn &rest args)
-  "Return a partial application of FN to left-hand ARGS.
-
-ARGS is a list of the last N arguments to pass to FN. The result is a new
-function which does the same as FN, except that the last N arguments are fixed
-at the values with which this function was called."
-  (declare (side-effect-free t))
-  `(lambda (&rest pre-args)
-     ,(car (list (if (symbolp fn)
-                     `(apply #',fn (append (list ,@args) pre-args))
-                   `(apply ,fn (append (list ,@args) pre-args)))))))
-
-(defmacro gh-repo--compose (&rest functions)
-  "Return right-to-left composition from FUNCTIONS."
-  (declare (debug t) (pure t) (side-effect-free t))
-  `(gh-repo--pipe ,@(reverse functions)))
 
 (defun gh-repo-fontify (content &optional mode-fn &rest args)
   "Fontify CONTENT according to MODE-FN called with ARGS.
@@ -250,14 +209,6 @@ X can be any object."
     (number-to-string x))
    (t (format "%s" x))))
 
-(defun gh-repo-file-same-p (path-a path-b)
-  "Return t if PATH-A and PATH-B are references to same file."
-  (when (and (file-exists-p path-a)
-             (file-exists-p path-b))
-    (let (file-name-handler-alist)
-      (equal
-       (file-truename (directory-file-name (expand-file-name path-a)))
-       (file-truename (directory-file-name (expand-file-name path-b)))))))
 
 (defun gh-repo-boolean (x)
   "Convert X to t or nil."
@@ -322,17 +273,6 @@ ITEM can be propertized string or plist."
           (directory-file-name parent)
         (file-relative-name parent)))))
 
-(defun gh-repo-file-ancestor-of-p (prefix-a path-b)
-  "Return t if PREFIX-A is ancestor of PATH-B."
-  (unless (gh-repo-file-same-p prefix-a path-b)
-    (let ((a (expand-file-name prefix-a))
-          (b (expand-file-name path-b)))
-      (string-prefix-p (if (file-directory-p a)
-                           (file-name-as-directory a)
-                         a)
-                       (if (file-directory-p b)
-                           (file-name-as-directory b)
-                         b)))))
 
 (gh-repo-defun-var-toggler-with-variants
  gh-repo--private gh-repo--private-toggle
@@ -355,50 +295,6 @@ ITEM can be propertized string or plist."
   "Run a shell COMMAND and return its output as a string, whitespace trimmed."
   (string-trim (shell-command-to-string command)))
 
-(defun gh-repo-file-dirs-recoursively (directory &optional match depth
-                                                 filter-fn)
-  "Return list of directories in DIRECTORY that matches MATCH.
-With optional argument DEPTH limit max depth.
-If FILTER-FN passed call it with directories."
-  (when (or (not (numberp depth))
-            (> depth 0))
-    (let ((dirs (directory-files directory nil match))
-          (it)
-          (acc))
-      (while (setq it (pop dirs))
-        (setq it (expand-file-name it directory))
-        (when (and
-               (file-readable-p it)
-               (file-directory-p it)
-               (if filter-fn
-                   (funcall filter-fn it)
-                 t))
-          (push it acc)
-          (setq acc (if (or (not (numberp depth))
-                            (> depth 0))
-                        (append acc (gh-repo-file-dirs-recoursively
-                                     it
-                                     match
-                                     (when depth
-                                       (1- depth))
-                                     filter-fn))
-                      acc))))
-      acc)))
-
-(defun gh-repo-non-git-dirs-recoursively (directory &optional match depth)
-  "Return list of non git directories in DIRECTORY that matches MATCH.
-With optional argument DEPTH limit max depth."
-  (gh-repo-file-dirs-recoursively
-   directory match depth
-   (lambda (it)
-     (let ((result (not
-                    (or
-                     (member (file-name-base it)
-                             '("snap" "node_modules" "share"))
-                     ;; (string-match-p "[0-9]" it)
-                     (file-exists-p (expand-file-name ".git" it))
-                     (file-exists-p (expand-file-name "node_modules" it))))))
-       result))))
 
 (defun gh-repo-vc-dir-p (directory)
   "Return the root directory for the DIRECTORY VC tree."
@@ -569,39 +465,10 @@ Invoke CALLBACK without args."
                             "--gitignore\s"
                             gh-repo-gitignores)))
 
-(defun gh-repo-guess-repos-dirs ()
-  "Execute `fdfind' and return list parent directories of git repos."
-  (or
-   (let ((command (seq-find #'executable-find
-                            '("fdfind" "fd" "find"))))
-     (pcase command
-       ((or "fd" "fdfind")
-        (funcall
-         (gh-repo--compose
-          #'delete-dups
-          (gh-repo--partial mapcar
-                            (gh-repo--compose #'gh-repo-file-parent
-                                              #'gh-repo-file-parent))
-          (gh-repo--rpartial split-string "\n" t)
-          #'shell-command-to-string
-          (gh-repo--rpartial string-join "\s"))
-         (list command
-               "--max-depth 5 --color=never -H -t d -g '.git' -E node_modules -E .cache -E .local -E .nvm . ~/")))
-       ("find" (funcall
-                (gh-repo--compose
-                 #'delete-dups
-                 (gh-repo--partial mapcar #'gh-repo-file-parent)
-                 (gh-repo--rpartial split-string "\n" t)
-                 #'shell-command-to-string)
-                "find ~/ -name .git -maxdepth 5 -exec dirname {} \\; -prune 2>&1 | grep -v \"Permission denied\""))))
-   (nconc
-    (list (expand-file-name "~/"))
-    (gh-repo-non-git-dirs-recoursively
-     "~/" "^[^\\.]"))))
 
 (defun gh-repo-read-dir (prompt basename)
   "Read directory with PROMPT and BASENAME."
-  (let* ((default-variants
+  (let* ((variants
           (mapcar
            (lambda (dir)
              (if (file-exists-p
@@ -619,10 +486,9 @@ Invoke CALLBACK without args."
                                         count)))
                    (expand-file-name name dir))
                (expand-file-name basename dir)))
-           (gh-repo-guess-repos-dirs)))
-         (variants (if (null (gh-repo-vc-dir-p default-directory))
-                       (append `(,default-directory) default-variants)
-                     default-variants)))
+           (if (listp gh-repo-download-default-repo-dir)
+               gh-repo-download-default-repo-dir
+             (list gh-repo-download-default-repo-dir)))))
     (file-name-as-directory
      (completing-read (or prompt "Directory:\s") variants nil nil
                       (gh-repo-file-parent
@@ -632,23 +498,11 @@ Invoke CALLBACK without args."
 (defun gh-repo-create-read-repo-name ()
   "Read a repository name to create."
   (interactive)
-  (let ((initial-input (if buffer-file-name
-                           (when buffer-file-name
-                             (file-name-base buffer-file-name))
-                         (car
-                          (split-string
-                           (if (gh-repo-file-ancestor-of-p
-                                gh-repo-download-default-repo-dir
-                                default-directory)
-                               (replace-regexp-in-string
-                                gh-repo-download-default-repo-dir
-                                ""
-                                (expand-file-name default-directory))
-                             (file-name-base default-directory))
-                           "/" t)))))
-    (when (or (null initial-input)
-              (string-empty-p initial-input))
-      (setq initial-input gh-repo--name))
+  (let ((initial-input (or gh-repo--name
+                           (if buffer-file-name
+                               (when buffer-file-name
+                                 (file-name-base buffer-file-name))
+                             (buffer-name)))))
     (setq gh-repo--name (read-string "Name of repository:\s" initial-input))))
 
 (defun gh-repo-normalize-visiblity-option ()
@@ -710,9 +564,6 @@ Invoke CALLBACK without args."
   (when-let ((cmd (gh-repo-generic-command)))
     (gh-repo-call-process (car cmd) (cdr cmd))))
 
-(defun gh-repo-command-hint ()
-  "Return hint with current gh repo command."
-  (string-join (gh-repo-generic-command) "\s"))
 
 ;;;###autoload
 (defun gh-repo-create-repo ()
@@ -959,6 +810,11 @@ Return plist with it's options."
        (symbol-value
         'gh-repo-predefined-templates)))))
 
+
+(defun gh-repo-command-hint ()
+  "Return hint with current gh repo command."
+  (string-join (gh-repo-generic-command) "\s"))
+
 ;;;###autoload
 (defun gh-repo-use-predefined-template ()
   "Read and populate saved options from `gh-repo-predefined-templates'."
@@ -975,20 +831,6 @@ Return plist with it's options."
     (dolist (var vars)
       (set var (plist-get pl var)))))
 
-(defun gh-repo--file-name-base-with-ext (file)
-  "Return the base name of the FILE but with extension."
-  (if-let ((ext (file-name-extension file)))
-      (concat (file-name-base file)
-              "."
-              ext)
-    (file-name-base file)))
-
-(defun gh-repo-flag-if-non-empty (flag value)
-  "Return list with FLAG and VALUE if VALUE is non-empty string."
-  (when (and flag
-             value
-             (not (string-empty-p value)))
-    (list flag value)))
 
 (defhydra gh-repo-hydra (:color pink
                                 :pre
