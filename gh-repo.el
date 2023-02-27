@@ -662,10 +662,11 @@ Each item is propertized with :type (private or public) and :description."
                                       "\s"))))
         (setq project-dir (expand-file-name
                            (car (reverse (split-string command)))))
-        (gh-repo-exec-in-dir command project-dir)
-        (when (file-exists-p project-dir)
-          (let ((default-directory project-dir))
-            (run-hooks 'gh-repo-after-create-repo-hook))))
+        (gh-repo-exec-in-dir command project-dir
+                             (lambda ()
+                               (when (file-exists-p project-dir)
+                                 (let ((default-directory project-dir))
+                                   (run-hooks 'gh-repo-after-create-repo-hook))))))
     (message "Cannot clone %s" name)))
 
 (defun gh-repo-remove (repo)
