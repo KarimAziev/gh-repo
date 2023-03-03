@@ -331,9 +331,10 @@ Invoke CALLBACK without args."
                 (if (= (process-exit-status process) 0)
                     (progn
                       (message "finished")
-                      (if callback
-                          (funcall callback)
-                        (dired project-dir)))
+                      (dired project-dir)
+                      (let ((default-directory project-dir))
+                        (when callback
+                          (funcall callback))))
                   (user-error "%s\n%s" command output)))))
            (when (fboundp 'comint-output-filter)
              (set-process-filter proc #'comint-output-filter)))))
