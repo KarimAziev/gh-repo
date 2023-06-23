@@ -37,12 +37,12 @@
 (require 'shell)
 
 (defcustom gh-repo-excluded-dirs '("~/Dropbox"
-																	 "~/melpa"
-																	 "~/.cache"
-																	 "~/.cask")
-	"List of directories to exlude from directories to clone."
-	:group 'gh-repo
-	:type '(repeat directory))
+                                   "~/melpa"
+                                   "~/.cache"
+                                   "~/.cask")
+  "List of directories to exlude from directories to clone."
+  :group 'gh-repo
+  :type '(repeat directory))
 
 
 (require 'comint)
@@ -51,61 +51,61 @@
 
 
 (defun gh-repo-project-expand-wildcards (pattern dir depth &optional full)
-	"Return list of files that matches PATTERN in DIR at max DEPTH.
+  "Return list of files that matches PATTERN in DIR at max DEPTH.
 If FULL is non-nil, files are absolute."
-	(let ((tramp-archive-enabled nil))
-		(let ((dir (file-name-as-directory dir)))
-			(mapcan (lambda (n)
-								(let ((tramp-archive-enabled nil))
-									(file-expand-wildcards
-									 (concat dir
-													 (string-join
-														(append (make-vector n "**")
-																		(list pattern))
-														"/"))
-									 full)))
-							(number-sequence 0 (1- depth))))))
+  (let ((tramp-archive-enabled nil))
+    (let ((dir (file-name-as-directory dir)))
+      (mapcan (lambda (n)
+                (let ((tramp-archive-enabled nil))
+                  (file-expand-wildcards
+                   (concat dir
+                           (string-join
+                            (append (make-vector n "**")
+                                    (list pattern))
+                            "/"))
+                   full)))
+              (number-sequence 0 (1- depth))))))
 
 (defun gh-repo-project-get-projects (&optional depth dir)
-	"Return all git repositories at DEPTH in DIR.
+  "Return all git repositories at DEPTH in DIR.
 Default value for DEPTH is 3.
 Default value for DIR is home directory."
-	(unless depth (setq depth 3))
-	(unless dir (setq dir "~/"))
-	(let ((tramp-archive-enabled nil)
-				(projects)
-				(excluded (delq nil (append
-														 gh-repo-excluded-dirs
-														 (if
-																 (require 'xdg nil t)
-																 nil
-															 (mapcar (lambda (it)
-																				 (when (fboundp it)
-																					 (funcall it)))
-																			 '(xdg-state-home
-																				 xdg-data-home
-																				 xdg-runtime-dir)))))))
-		(dolist (dir (directory-files dir t directory-files-no-dot-files-regexp))
-			(when (and (file-directory-p dir)
-								 (file-accessible-directory-p dir)
-								 (not (seq-find (apply-partially #'file-equal-p dir)
-																excluded)))
-				(setq projects
-							(if (file-exists-p (concat dir "/.git"))
-									(push (concat dir "/.git") projects)
-								(nconc (gh-repo-project-expand-wildcards "*/.git" dir
-																												 (1- depth))
-											 projects)))))
-		(mapcar (lambda (dir)
-							(abbreviate-file-name (file-name-parent-directory dir)))
-						projects)))
+  (unless depth (setq depth 3))
+  (unless dir (setq dir "~/"))
+  (let ((tramp-archive-enabled nil)
+        (projects)
+        (excluded (delq nil (append
+                             gh-repo-excluded-dirs
+                             (if
+                                 (require 'xdg nil t)
+                                 nil
+                               (mapcar (lambda (it)
+                                         (when (fboundp it)
+                                           (funcall it)))
+                                       '(xdg-state-home
+                                         xdg-data-home
+                                         xdg-runtime-dir)))))))
+    (dolist (dir (directory-files dir t directory-files-no-dot-files-regexp))
+      (when (and (file-directory-p dir)
+                 (file-accessible-directory-p dir)
+                 (not (seq-find (apply-partially #'file-equal-p dir)
+                                excluded)))
+        (setq projects
+              (if (file-exists-p (concat dir "/.git"))
+                  (push (concat dir "/.git") projects)
+                (nconc (gh-repo-project-expand-wildcards "*/.git" dir
+                                                         (1- depth))
+                       projects)))))
+    (mapcar (lambda (dir)
+              (abbreviate-file-name (file-name-parent-directory dir)))
+            projects)))
 
 (defun gh-repo-find-clone-directories ()
-	"Return list of git parents directories."
-	(append (delete-dups (mapcar #'file-name-parent-directory
-															 (gh-repo-project-get-projects 3)))
-					(when (fboundp 'straight--repos-dir)
-						(list (straight--repos-dir)))))
+  "Return list of git parents directories."
+  (append (delete-dups (mapcar #'file-name-parent-directory
+                               (gh-repo-project-get-projects 3)))
+          (when (fboundp 'straight--repos-dir)
+            (list (straight--repos-dir)))))
 
 
 
@@ -121,8 +121,8 @@ Default value for DIR is home directory."
                  :tag "Directory list"
                  :value ("~/") directory)
                 (directory :tag "Directory")
-								(function-item  :tag "Auto" gh-repo-find-clone-directories)
-								(function :tag "Custom Function")))
+                (function-item  :tag "Auto" gh-repo-find-clone-directories)
+                (function :tag "Custom Function")))
 
 (defvar gh-repo-minibuffer-map
   (let ((map (make-sparse-keymap)))
@@ -447,12 +447,12 @@ Invoke CALLBACK without args."
       secret)))
 
 (defun gh-repo-read-token ()
-	"Search for gh token in `auth-sources'."
-	(when-let ((variants
+  "Search for gh token in `auth-sources'."
+  (when-let ((variants
               (seq-uniq
                (auth-source-search
                 :host "api.github.com"
-								:require '(:user :secret)
+                :require '(:user :secret)
                 :max most-positive-fixnum)
                (lambda (a b)
                  (equal (gh-repo-auth-info-password a)
@@ -463,11 +463,11 @@ Invoke CALLBACK without args."
            :user (completing-read
                   "Source:\s"
                   (delq nil
-												(mapcar
-												 (lambda (it)
-													 (when (plist-get it :user)
-														 (plist-get it :user)))
-												 variants))
+                        (mapcar
+                         (lambda (it)
+                           (when (plist-get it :user)
+                             (plist-get it :user)))
+                         variants))
                   nil t))))))
 
 ;;;###autoload
@@ -543,8 +543,8 @@ Invoke CALLBACK without args."
 
 
 (defun gh-repo-read-dir (prompt basename)
-	"Read directory with PROMPT and BASENAME."
-	(let* ((variants
+  "Read directory with PROMPT and BASENAME."
+  (let* ((variants
           (mapcar
            (lambda (dir)
              (if (file-exists-p
@@ -560,13 +560,13 @@ Invoke CALLBACK without args."
                                         count)))
                    (expand-file-name name dir))
                (expand-file-name basename dir)))
-					 (let ((items (if (functionp gh-repo-download-default-repo-dir)
-														(funcall gh-repo-download-default-repo-dir)
-													gh-repo-download-default-repo-dir)))
-						 (if (listp items)
-								 items
-							 (list items))))))
-		(file-name-as-directory
+           (let ((items (if (functionp gh-repo-download-default-repo-dir)
+                            (funcall gh-repo-download-default-repo-dir)
+                          gh-repo-download-default-repo-dir)))
+             (if (listp items)
+                 items
+               (list items))))))
+    (file-name-as-directory
      (completing-read (or prompt "Directory:\s") variants nil nil))))
 
 ;;;###autoload
