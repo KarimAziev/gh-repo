@@ -133,7 +133,7 @@ Default value for DIR is home directory."
     map)
   "Keymap for files sources.")
 
-(defcustom gh-repo-default-repos-limit 50
+(defcustom gh-repo-default-repos-limit 100
   "How many repositories to load during completion `gh-repo-read-user-repo'.
 It just initial value and can be changed dynamically in minibuffer:
 
