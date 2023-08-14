@@ -88,8 +88,10 @@ Default value for DIR is home directory."
     (dolist (dir (directory-files dir t directory-files-no-dot-files-regexp))
       (when (and (file-directory-p dir)
                  (file-accessible-directory-p dir)
-                 (not (seq-find (apply-partially #'file-equal-p dir)
-                                excluded)))
+                 (not (or (seq-find (apply-partially #'file-equal-p dir)
+                                    excluded)
+                          (seq-find (apply-partially #'file-in-directory-p dir)
+                                    excluded))))
         (setq projects
               (if (file-exists-p (concat dir "/.git"))
                   (push (concat dir "/.git") projects)
