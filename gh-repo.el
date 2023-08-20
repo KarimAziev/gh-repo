@@ -6,7 +6,7 @@
 ;; URL: https://github.com/KarimAziev/gh-repo
 ;; Keywords: lisp, vc, tools
 ;; Version: 0.3.0
-;; Package-Requires: ((emacs "27.1") (hydra "0.15.0") (request "0.3.2"))
+;; Package-Requires: ((emacs "29.1") (hydra "0.15.0") (request "0.3.2"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -128,8 +128,8 @@ Default value for DIR is home directory."
 
 (defvar gh-repo-minibuffer-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C->") 'gh-repo-switch-to-hydra)
-    (define-key map (kbd "M-<up>") 'gh-repo-change-repos-limit)
+    (define-key map (kbd "C->") #'gh-repo-switch-to-hydra)
+    (define-key map (kbd "M-<up>") #'gh-repo-change-repos-limit)
     map)
   "Keymap for files sources.")
 
