@@ -5,8 +5,8 @@
 ;; Author: Karim Aziiev <karim.aziiev@gmail.com>
 ;; URL: https://github.com/KarimAziev/gh-repo
 ;; Keywords: lisp, vc, tools
-;; Version: 0.3.0
-;; Package-Requires: ((emacs "29.1") (hydra "0.15.0") (request "0.3.2"))
+;; Version: 1.0.0
+;; Package-Requires: ((emacs "29.1") (request "0.3.2") (transient "0.4.1") (ghub "3.6.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -33,8 +33,10 @@
 (eval-when-compile
   (require 'subr-x))
 (require 'url-parse)
-(require 'hydra)
+
 (require 'shell)
+(require 'transient)
+(require 'ghub)
 
 (defcustom gh-repo-excluded-dirs '("~/Dropbox"
                                    "~/melpa"
@@ -44,10 +46,254 @@
   :group 'gh-repo
   :type '(repeat directory))
 
+(defcustom gh-repo-default-license "gpl-3.0"
+  "Default repository license."
+  :type 'string
+  :group 'gh-repo)
 
+(defcustom gh-repo-ghub-auth-info '("" . gh-repo)
+  "String of USERNAME^MARKER in auth sources."
+  :type '(cons :tag "Auth" (string :tag "Github Username")
+               (radio
+                :tag "Marker"
+                (symbol :tag "Suffix" gh-repo)
+                (string :tag "OAuth Token")))
+  :group 'gh-repo)
+
+(defcustom gh-repo-download-default-repo-dir 'gh-repo-find-clone-directories
+  "Default directory to use when `gh-repo' reads destination."
+  :group 'gh-repo
+  :type '(radio (repeat
+                 :tag "Directory list"
+                 :value ("~/") directory)
+                (directory :tag "Directory")
+                (function-item  :tag "Auto" gh-repo-find-clone-directories)
+                (function :tag "Custom Function")))
+
+(defcustom gh-repo-default-repos-limit 30
+  "How many repositories to load during completion `gh-repo-read-user-repo'."
+  :type 'integer
+  :group 'gh-repo)
+
+(defcustom gh-repo-browse-function (if (and window-system
+                                            (featurep 'xwidget-internal))
+                                       'gh-repo--browse-with-xwidget
+                                     'browse-url)
+  "Function for browsing preview page.
+
+It will be called with one argument - url to open.
+
+Default value is to use xwidgets if available, othervise `browse-url'."
+  :type '(radio  (function-item gh-repo--browse-with-xwidget)
+                 (function-item browse-url)
+                 (function :tag "Custom function"))
+  :group 'gh-repo)
+
+(defcustom gh-repo-actions '((?c "clone" gh-repo-clone-repo)
+                             (?b "browse" gh-repo-browse))
+  "Actions for `gh-repo-read-user-repo'.
+
+Each element is a list comprising (KEY LABEL ACTION)
+
+KEY is a character for `read-multiple-choice', and LABEL is a
+string which describes an action.
+
+ACTION is a a function which should accept one argument
+- repository of user name."
+  :type '(alist
+          :key-type (character
+                     :tag "Key"
+                     :value ?c)
+          :value-type (list (string
+                             :tag "Label"
+                             :value "<description>")
+                            (function :tag "Function")))
+  :group 'gh-repo)
+
+(defcustom gh-repo-annotation-spec-alist '((description "%s" 40)
+                                           (visibility "👁️%s" 20)
+                                           (stargazers_count "⭐%s" 10)
+                                           (open_issues "⁉️%s" 10))
+  "Alist of symbol, format string and width for displaying a GitHub repository."
+  :group 'gh-repo
+  :type '(alist
+          :key-type symbol
+          :value-type (list
+                       (string :tag "Column Name" "%s")
+                       (integer :tag "Column Width" 20))))
 (require 'comint)
 (require 'request)
 (require 'auth-source)
+
+(defvar gh-repo-util-host-regexp
+  (concat "\\("
+          "\\(\\(github\\|gitlab\\|gitlab\\.[a-z]+\\)\\.com\\)"
+          "\\|"
+          "\\(\\(bitbucket\\|salsa[\\.]debian\\|framagit\\|codeberg\\|git[\\.]savannah[\\.]gnu\\|git[\\.]kernel\\|git[\\.]suckless\\|code[\\.]orgmode\\|gitlab[\\.]gnome\\)[\\.]org\\)"
+          "\\|"
+          "\\(\\(repo[\\.]or\\)[\\.]cz\\)"
+          "\\|"
+          "\\(git\\.sr\\.ht\\)"
+          "\\)")
+  "Regexp matching common git hosts.")
+
+
+(defmacro gh-repo-util--pipe (&rest functions)
+  "Return left-to-right composition from FUNCTIONS."
+  (declare (debug t)
+           (pure t)
+           (side-effect-free t))
+  `(lambda (&rest args)
+     ,@(let ((init-fn (pop functions)))
+         (list
+          (seq-reduce
+           (lambda (acc fn)
+             (if (symbolp fn)
+                 `(funcall #',fn ,acc)
+               `(funcall ,fn ,acc)))
+           functions
+           (if (symbolp init-fn)
+               `(apply #',init-fn args)
+             `(apply ,init-fn args)))))))
+(defmacro gh-repo-util--rpartial (fn &rest args)
+  "Return a partial application of FN to right-hand ARGS.
+
+ARGS is a list of the last N arguments to pass to FN. The result is a new
+function which does the same as FN, except that the last N arguments are fixed
+at the values with which this function was called."
+  (declare (side-effect-free t))
+  `(lambda (&rest pre-args)
+     ,(car (list (if (symbolp fn)
+                     `(apply #',fn (append pre-args (list ,@args)))
+                   `(apply ,fn (append pre-args (list ,@args))))))))
+
+(defmacro gh-repo-util--compose (&rest functions)
+  "Return right-to-left composition from FUNCTIONS."
+  (declare (debug t)
+           (pure t)
+           (side-effect-free t))
+  `(gh-repo-util--pipe ,@(reverse functions)))
+
+(defmacro gh-repo-util-when (pred fn)
+  "Return a function that call FN if the result of calling PRED is non-nil.
+Both PRED and FN are called with one argument.
+If the result of PRED is nil, return the argument as is."
+  (declare
+   (indent defun))
+  `(lambda (arg)
+     (if ,(if (symbolp pred)
+              `(,pred arg)
+            `(funcall ,pred arg))
+         ,(if (symbolp fn)
+              `(,fn arg)
+            `(funcall ,fn arg))
+       arg)))
+
+(defun gh-repo-util-compose-while-not-nil (&rest functions)
+  "Return right-to-left composition from FUNCTIONS."
+  (let ((fn))
+    (setq functions (reverse functions))
+    (setq fn (pop functions))
+    (lambda (&rest args)
+      (let ((arg
+             (unless (null (flatten-list args))
+               (apply fn args))))
+        (while (setq fn
+                     (unless (null arg)
+                       (pop functions)))
+          (let ((res (apply fn (list arg))))
+            (setq arg res)))
+        arg))))
+
+(defun gh-repo-util-alist-ssh-hosts ()
+  "Return hosts found in .ssh/config."
+  (when (file-exists-p "~/.ssh/config")
+    (with-temp-buffer
+      (insert-file-contents
+       "~/.ssh/config")
+      (let ((alist))
+        (while (re-search-forward
+                "\\(HOST[\s\t]\\([^\n]+\\)[\n\s\t]+HOSTNAME[\s\t\n]\\([^\s\t\n]+\\)\\)"
+                nil t 1)
+          (let ((host (match-string-no-properties 2))
+                (hostname (match-string-no-properties 3)))
+            (push (cons host hostname)
+                  alist)))
+        alist))))
+
+(defun gh-repo-util-normalize-url-filename (filename)
+  "Transform FILENAME to git filename."
+  (funcall (gh-repo-util-compose-while-not-nil
+            (gh-repo-util-when (gh-repo-util--compose
+                            not
+                            (apply-partially #'string-suffix-p
+                                             ".git"))
+              (gh-repo-util--rpartial concat ".git"))
+            (gh-repo-util--rpartial string-join "/")
+            (gh-repo-util-when
+              (gh-repo-util--compose
+               (apply-partially #'<= 2)
+               length)
+              (gh-repo-util--rpartial seq-take 2))
+            (gh-repo-util--rpartial split-string "/")
+            (apply-partially
+             #'replace-regexp-in-string
+             "^/\\|/$" ""))
+           filename))
+
+(defun gh-repo-util-https-url-p (url)
+  "Return t if URL string is githost with https protocol."
+  (not (null
+        (string-match-p
+         (concat "https://" gh-repo-util-host-regexp)
+         url))))
+
+(defun gh-repo-util-url-https-to-ssh (url &optional ssh-host)
+  "Transform URL with https protocol to ssh.
+With optional argument SSH-HOST also replace host."
+  (require 'url-parse)
+  (when-let ((urlobj
+              (when (and url
+                         (gh-repo-util-https-url-p url))
+                (url-generic-parse-url url))))
+    (when-let ((host (url-host urlobj))
+               (reponame (gh-repo-util-normalize-url-filename
+                          (url-filename urlobj))))
+      (string-trim (concat "git@" (or ssh-host host)
+                           ":" reponame)))))
+
+(defun gh-repo-util-ssh-url-p (url)
+  "Return t if URL string is githost with git protocol."
+  (string-match-p
+   (concat "git@" gh-repo-util-host-regexp)
+   url))
+
+(defun gh-repo-util-get-ssh-variants (ssh-url)
+  "Return variants of git ssh for SSH-URL."
+  (let* ((local-alist (gh-repo-util-alist-ssh-hosts))
+         (cell (with-temp-buffer
+                 (save-excursion
+                   (insert (replace-regexp-in-string "^git@" ""
+                                                     ssh-url)))
+                 (let ((beg (point))
+                       (end))
+                   (setq end (re-search-forward gh-repo-util-host-regexp nil t 1))
+                   (cons (buffer-substring-no-properties beg end)
+                         (string-trim (buffer-substring-no-properties
+                                       end
+                                       (point-max))))))))
+    (setq local-alist (seq-filter (lambda (it)
+                                    (equal
+                                     (car cell)
+                                     (cdr it)))
+                                  local-alist))
+    (seq-uniq
+     (append
+      (list ssh-url)
+      (mapcar (lambda (it)
+                (concat "git@" (car it)
+                        (cdr cell)))
+              local-alist)))))
 
 
 (defun gh-repo-project-expand-wildcards (pattern dir depth &optional full)
@@ -110,270 +356,28 @@ Default value for DIR is home directory."
             (list (straight--repos-dir)))))
 
 
+(defun gh-repo--browse-with-xwidget (url)
+  "Visit an URL in xwidget in other window."
+  (require 'xwidget)
+  (let ((orig-wind (selected-window)))
+    (with-selected-window
+        (if (minibuffer-window-active-p orig-wind)
+            (with-minibuffer-selected-window
+              (let ((wind (selected-window)))
+                (or
+                 (window-right wind)
+                 (window-left wind)
+                 (split-window-right))))
+          (let ((wind (selected-window)))
+            (or
+             (window-right wind)
+             (window-left wind)
+             (split-window-right))))
+      (xwidget-webkit-browse-url url))))
 
-(defcustom gh-repo-default-license "gpl-3.0"
-  "Default repository license."
-  :type 'string
-  :group 'gh-repo)
-
-(defcustom gh-repo-download-default-repo-dir 'gh-repo-find-clone-directories
-  "Default directory to use when `gh-repo' reads destination."
-  :group 'gh-repo
-  :type '(radio (repeat
-                 :tag "Directory list"
-                 :value ("~/") directory)
-                (directory :tag "Directory")
-                (function-item  :tag "Auto" gh-repo-find-clone-directories)
-                (function :tag "Custom Function")))
-
-(defvar gh-repo-minibuffer-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C->") #'gh-repo-switch-to-hydra)
-    (define-key map (kbd "M-<up>") #'gh-repo-change-repos-limit)
-    map)
-  "Keymap for files sources.")
-
-(defcustom gh-repo-default-repos-limit 100
-  "How many repositories to load during completion `gh-repo-read-user-repo'.
-It just initial value and can be changed dynamically in minibuffer:
-
-\\<gh-repo-minibuffer-map>\ `\\[gh-repo-change-repos-limit]'."
-  :type 'integer
-  :group 'gh-repo)
-
-(defvar gh-repo-gitignores
-  '("AL" "Actionscript" "Ada" "Agda" "Android" "AppEngine"
-    "AppceleratorTitanium" "ArchLinuxPackages" "Autotools" "C++" "C" "CFWheels"
-    "CMake" "CUDA" "CakePHP" "ChefCookbook" "Clojure" "CodeIgniter" "CommonLisp"
-    "Composer" "Concrete5" "Coq" "CraftCMS" "D" "DM" "Dart" "Delphi" "Drupal"
-    "EPiServer" "Eagle" "Elisp" "Elixir" "Elm" "Erlang" "ExpressionEngine"
-    "ExtJs"
-    "Fancy" "Finale" "FlaxEngine" "ForceDotCom" "Fortran" "FuelPHP" "GWT" "Gcov"
-    "GitBook" "AL" "Anjuta" "Ansible" "Archives" "Backup" "Bazaar" "BricxCC"
-    "CVS"
-    "Calabash" "Cloud9" "CodeKit" "DartEditor" "Diff" "Dreamweaver" "Dropbox"
-    "Eclipse" "EiffelStudio" "Emacs" "Ensime" "Espresso" "FlexBuilder" "GPG"
-    "Images" "JDeveloper" "JEnv" "JetBrains" "KDevelop4" "Kate" "Lazarus"
-    "LibreOffice" "Linux" "LyX" "MATLAB" "Mercurial" "Metals" "MicrosoftOffice"
-    "ModelSim" "Momentics" "MonoDevelop" "NetBeans" "Ninja" "NotepadPP" "Octave"
-    "Otto" "PSoCCreator" "Patch" "PuTTY" "Redcar" "Redis" "SBT" "SVN"
-    "SlickEdit"
-    "Stata" "SublimeText" "Syncthing" "SynopsysVCS" "Tags" "TextMate"
-    "TortoiseGit" "Vagrant" "Vim" "VirtualEnv" "Virtuoso" "VisualStudioCode"
-    "WebMethods" "Windows" "Xcode" "XilinxISE" "macOS" "Go" "Godot" "Gradle"
-    "Grails" "Haskell" "IGORPro" "Idris" "JBoss" "JENKINS_HOME" "Java" "Jekyll"
-    "Joomla" "Julia" "KiCad" "Kohana" "Kotlin" "LabVIEW" "Laravel" "Leiningen"
-    "LemonStand" "Lilypond" "Lithium" "Lua" "Magento" "Maven" "Mercury"
-    "MetaProgrammingSystem" "Nanoc" "Nim" "Node" "OCaml" "Objective-C" "Opa"
-    "OpenCart" "OracleForms" "Packer" "Perl" "Phalcon" "PlayFramework" "Plone"
-    "Prestashop" "Processing" "PureScript" "Python" "Qooxdoo" "Qt" "R" "ROS"
-    "Rails" "Raku" "RhodesRhomobile" "Ruby" "Rust" "SCons" "Sass" "Scala"
-    "Scheme"
-    "Scrivener" "Sdcc" "SeamGen" "SketchUp" "Smalltalk" "Stella" "SugarCRM"
-    "Swift" "Symfony" "SymphonyCMS" "TeX" "Terraform" "Textpattern"
-    "TurboGears2"
-    "TwinCAT3" "Typo3" "Unity" "UnrealEngine" "VVVV" "VisualStudio" "Waf"
-    "WordPress" "Xojo" "Yeoman" "Yii" "ZendFramework" "Zephir" "SAM"
-    "AltiumDesigner" "AutoIt" "B4X" "Bazel" "Beef" "InforCMS" "Kentico"
-    "Umbraco"
-    "core" "Phoenix" "Exercism" "GNOMEShellExtension" "Go.AllowList" "Hugo"
-    "Gretl" "JBoss4" "JBoss6" "Cordova" "Meteor" "NWjs" "Vue" "LensStudio"
-    "Snap"
-    "Logtalk" "NasaSpecsIntact" "OpenSSL" "Bitrix" "CodeSniffer" "Drupal7"
-    "Jigsaw" "Magento1" "Magento2" "Pimcore" "ThinkPHP" "Puppet"
-    "JupyterNotebooks" "Nikola" "ROS2" "Racket" "Red" "SPFx" "Splunk" "Strapi"
-    "V"
-    "Xilinx" "AtmelStudio" "IAR_EWARM" "esp-idf" "uVision"))
-
-(defvar gh-repo-options
-  `(plist :options
-          (,@(mapcar
-              (lambda (it)
-                `(,it
-                  (const :tag ,(concat "--"
-                                       (car
-                                        (last
-                                         (split-string
-                                          (symbol-name it)
-                                          "--" t))))
-                         t)))
-              '(gh-repo--push
-                gh-repo--disable-wiki
-                gh-repo--disable-issues
-                gh-repo--internal))
-           (gh-repo--private (radio (const :tag "--private" "--public")
-                                    (const :tag "--public" "--public")))
-           (gh-repo--description (string :tag "Description"))
-           (gh-repo--license
-            (radio (const :tag "GNU General Public License v3.0" "gpl-3.0")
-                   (const :tag"GNU Affero General Public License v3.0"
-                          "agpl-3.0")
-                   (const :tag "Apache License 2.0" "apache-2.0")
-                   (const :tag "BSD 2-Clause \"Simplified\" License"
-                          "bsd-2-clause")
-                   (const :tag "BSD 3-Clause \"New\" or \"Revised\" License"
-                          "bsd-3-clause")
-                   (const :tag "Boost Software License 1.0" "bsl-1.0")
-                   (const :tag "Creative Commons Zero v1.0 Universal" "cc0-1.0")
-                   (const :tag "Eclipse Public License 2.0" "epl-2.0")
-                   (const :tag "GNU General Public License v2.0" "gpl-2.0")
-                   (const :tag "GNU Lesser General Public License v2.1"
-                          "lgpl-2.1")
-                   (const :tag "MIT License" "mit")
-                   (const :tag "Mozilla Public License 2.0" "mpl-2.0")
-                   (const :tag "The Unlicense" "unlicense")))
-           (gh-repo--gitignore (radio
-                                ,@(mapcar (lambda (it) `(const ,it ,it))
-                                          gh-repo-gitignores))))))
-
-(defcustom gh-repo-predefined-templates '()
-  "Alist of template names and saved options.
-To use some template call command `gh-repo-use-predefined-template'."
-  :group 'gh-repo
-  :type `(alist :key-type (string :tag "Template name")
-                :value-type ,gh-repo-options))
-
-(defcustom gh-repo-actions '((?c "clone" gh-repo-clone-repo)
-                             (?b "browse" gh-repo-visit)
-                             (?v "view" gh-repo-view-repo)
-                             (?D "delete" gh-repo-remove))
-  "Actions for `gh-repo-read-user-repo'.
-
-Each element is a list comprising (KEY LABEL ACTION)
-
-KEY is a character for `read-multiple-choice', and LABEL is a
-string which describes an action.
-
-ACTION is a a function which should accept one argument
-- repository of user name."
-  :type '(alist :key-type (character :tag "Key" :value ?c)
-                :value-type (list (string :tag "Label" :value "<description>")
-                                  (function :tag "Function")))
-  :group 'gh-repo)
 
 (defvar gh-repo-after-create-repo-hook nil
   "List of hooks to run after cloning new repository.")
-
-
-(defun gh-repo-fontify (content &optional mode-fn &rest args)
-  "Fontify CONTENT according to MODE-FN called with ARGS.
-If CONTENT is not a string, instead of MODE-FN emacs-lisp-mode will be used."
-  (with-temp-buffer
-    (delay-mode-hooks
-      (apply (or mode-fn 'emacs-lisp-mode) args)
-      (goto-char (point-min))
-      (insert (if (or (eq major-mode 'emacs-lisp-mode)
-                      (not (stringp content)))
-                  (pp-to-string content)
-                content))
-      (font-lock-ensure)
-      (buffer-string))))
-
-(defun gh-repo-stringify (x)
-  "Convert X to string effeciently.
-X can be any object."
-  (cond
-   ((stringp x)
-    x)
-   ((symbolp x)
-    (symbol-name x))
-   ((integerp x)
-    (number-to-string x))
-   ((floatp x)
-    (number-to-string x))
-   (t (format "%s" x))))
-
-
-(defun gh-repo-boolean (x)
-  "Convert X to t or nil."
-  (if x t nil))
-
-(defmacro gh-repo-defun-var-toggler-with-variants (var toggler variants
-                                                       default-value)
-  "Create VAR and VARIANTS TOGGLER."
-  (declare (indent 2) (debug t))
-  `(progn (defvar ,var ,default-value)
-          (defun ,toggler ()
-            (interactive)
-            (let ((variants ,variants))
-              (unless ,var (setq ,var (car variants)))
-              (setq ,var (if (> (length variants) 2)
-                             (completing-read "Variant:\s" variants)
-                           (car (remove nil (remove ,var variants)))))))))
-
-(defmacro gh-repo-defun-var-toggler (var toggler &optional initial-value)
-  "Define VAR with INITIAL-VALUE and function with name TOGGLER."
-  (declare (indent 2) (debug t))
-  `(progn (defvar ,var ,initial-value)
-          (defun ,toggler ()
-            (interactive)
-            (setq ,var (not (gh-repo-boolean ,var))))))
-
-(defun gh-repo-get-prop (item property)
-  "Get PROPERTY from ITEM.
-ITEM can be propertized string or plist."
-  (if (stringp item)
-      (get-text-property 0 property item)
-    (when (listp item)
-      (plist-get item property))))
-
-(defun gh-repo-add-props (string &rest properties)
-  "Propertize STRING with PROPERTIES."
-  (setq string (gh-repo-stringify string))
-  (let* ((result (list 'head))
-         (last result))
-    (while properties
-      (let* ((key (pop properties))
-             (val (pop properties))
-             (new (and val (list key val))))
-        (when new
-          (setcdr last new)
-          (setq last (cdr new)))))
-    (apply #'propertize string (cdr result))))
-
-(defun gh-repo-file-parent (path)
-  "Return the parent directory to PATH without slash."
-  (let ((parent (file-name-directory
-                 (directory-file-name
-                  (expand-file-name path default-directory)))))
-    (when (and (file-exists-p path)
-               (file-exists-p parent)
-               (not (equal
-                     (file-truename (directory-file-name
-                                     (expand-file-name path)))
-                     (file-truename (directory-file-name
-                                     (expand-file-name parent))))))
-      (if (file-name-absolute-p path)
-          (directory-file-name parent)
-        (file-relative-name parent)))))
-
-
-(gh-repo-defun-var-toggler-with-variants
- gh-repo--private gh-repo--private-toggle
- '("--private" "--public")
- "--private")
-
-(gh-repo-defun-var-toggler gh-repo--push
-                            gh-repo--push-toggle)
-
-(gh-repo-defun-var-toggler gh-repo--disable-wiki
-    gh-repo--disable-wiki-toggle)
-
-(gh-repo-defun-var-toggler gh-repo--disable-issues
-    gh-repo--disable-issues-toggle)
-
-(gh-repo-defun-var-toggler gh-repo--internal
-                            gh-repo--internal-toggle)
-
-(defun gh-repo-exec (command)
-  "Run a shell COMMAND and return its output as a string, whitespace trimmed."
-  (string-trim (shell-command-to-string command)))
-
-
-(defun gh-repo-vc-dir-p (directory)
-  "Return the root directory for the DIRECTORY VC tree."
-  (let ((default-directory directory))
-    (vc-root-dir)))
 
 (defun gh-repo-exec-in-dir (command project-dir &optional callback)
   "Execute COMMAND in PROJECT-DIR.
@@ -413,34 +417,6 @@ Invoke CALLBACK without args."
            (when (fboundp 'comint-output-filter)
              (set-process-filter proc #'comint-output-filter)))))
 
-(defvar gh-repo--description nil)
-(defvar gh-repo--license gh-repo-default-license)
-(defvar gh-repo--gitignore nil)
-(defvar gh-repo--name nil)
-
-(defvar gh-repo-current-user nil)
-(defun gh-repo-get-current-user ()
-  "Return name of currently logged gh user or nil."
-  (with-temp-buffer
-    (save-excursion (insert (shell-command-to-string "gh auth status")))
-    (when (re-search-forward
-           "Logged in to github.com as[\s\t\n\r\f]\\([^\s\t\n\r\f]+\\)"
-           nil t 1)
-      (match-string-no-properties 1))))
-
-(defun gh-repo-login-with-token (token)
-  "Feed TOKEN to gh auth and return currently logged user or nil."
-  (with-temp-buffer
-    (insert token)
-    (let ((status (call-process-region
-                   (point-min)
-                   (point-max)
-                   "gh" t t nil
-                   "auth" "login"
-                   "--with-token")))
-      (when (eq 0 status)
-        (gh-repo-get-current-user)))))
-
 (defun gh-repo-auth-info-password (auth-info)
   "Return secret from AUTH-INFO."
   (let ((secret (plist-get auth-info :secret)))
@@ -448,7 +424,15 @@ Invoke CALLBACK without args."
         (funcall secret)
       secret)))
 
-(defun gh-repo-read-token ()
+;;;###autoload
+(defun gh-repo-change-user ()
+  "Search for gh token in `auth-sources'."
+  (interactive)
+  (gh-repo-read-auth-marker)
+  (when transient-current-command
+    (transient-setup transient-current-command)))
+
+(defun gh-repo-read-auth-marker ()
   "Search for gh token in `auth-sources'."
   (when-let ((variants
               (seq-uniq
@@ -459,34 +443,30 @@ Invoke CALLBACK without args."
                (lambda (a b)
                  (equal (gh-repo-auth-info-password a)
                         (gh-repo-auth-info-password b))))))
-    (gh-repo-auth-info-password
-     (car (auth-source-search
-           :host "api.github.com"
-           :user (completing-read
-                  "Source:\s"
-                  (delq nil
-                        (mapcar
-                         (lambda (it)
-                           (when (plist-get it :user)
-                             (plist-get it :user)))
-                         variants))
-                  nil t))))))
-
-;;;###autoload
-(defun gh-repo-change-user ()
-  "Change gh user."
-  (interactive)
-  (setq gh-repo-current-user (gh-repo-get-current-user))
-  (if (or (null gh-repo-current-user)
-          (yes-or-no-p (format "Change user %s?" gh-repo-current-user)))
-      (setq gh-repo-current-user
-            (gh-repo-login-with-token (or
-                                       (gh-repo-read-token)
-                                       (read-passwd
-                                        "GH token:\s"))))
-    gh-repo-current-user))
-
-(defvar gh-repo-licence-types nil)
+    (pcase-let* ((users (seq-filter (apply-partially #'string-match-p "\\^")
+                                    (delq nil
+                                          (mapcar
+                                           (lambda (it)
+                                             (when (plist-get it :user)
+                                               (plist-get it :user)))
+                                           variants))))
+                 (user (if (> (length users) 1)
+                           (completing-read
+                            "Source:\s"
+                            users
+                            nil t)
+                         (read-string "User: " (car users))))
+                 (`(,user ,marker)
+                  (split-string user "\\^" t))
+                 (cell (cons user
+                             (if marker
+                                 (intern marker)
+                               (read-string "Ghub token: ")))))
+      (if (yes-or-no-p "Save for future?")
+          (customize-save-variable 'gh-repo-ghub-auth-info cell
+                                   "Saved by gh-repo")
+        (setq gh-repo-ghub-auth-info cell))
+      gh-repo-ghub-auth-info)))
 
 (defun gh-repo-load-licences ()
   "Return list of available licences from github api."
@@ -506,43 +486,204 @@ Invoke CALLBACK without args."
             (t
              (error "Request failed"))))))
 
-;;;###autoload
-(defun gh-repo-read-license ()
-  "Read a licence in the minibuffer, with completion."
+(defun gh-repo-load-gitignore-templates ()
+  "Return list of available licences from github api."
+  (let ((response (request "https://api.github.com/gitignore/templates"
+                    :type "GET"
+                    :headers
+                    `(("accept" . "application/json")
+                      ("User-Agent" . "Emacs Restclient")
+                      ("content-type" . "application/json"))
+                    :sync t
+                    :parser 'json-read)))
+    (let ((status-code (request-response-status-code response)))
+      (cond ((not status-code)
+             (user-error "Request failed: Could not reach the server"))
+            ((= status-code 200)
+             (request-response-data response))
+            (t
+             (error "Request failed"))))))
+
+(defun gh-repo-convert-region-pad-right (str width)
+  "Pad STR with spaces on the right to increase the length to WIDTH."
+  (unless str (setq str ""))
+  (let ((exceeds (> (length str) width))
+        (separator "..."))
+    (cond ((and exceeds
+                (> width
+                   (length separator)))
+           (concat (substring str 0 (- width (length separator))) separator))
+          ((and exceeds)
+           str)
+          (t (concat str (make-string (- width (length str)) ?\ ))))))
+
+(defun gh-repo-values-to-columns (data)
+  "Convert repository values to columns.
+
+Converts values in DATA to columns using the format specified in
+`gh-repo-annotation-spec-alist'.
+Each value is formatted using the corresponding format string and padded to
+the specified width.
+
+Returns a string with the formatted values separated by newlines."
+  (mapconcat
+   (pcase-lambda (`(,key ,format-str ,width))
+     (let ((value (alist-get key data)))
+       (gh-repo-convert-region-pad-right (format format-str (or value ""))
+                                         width)))
+   gh-repo-annotation-spec-alist))
+
+(defun gh-repo--ivy-read-repo (prompt url)
+  "Read a repo in the minibuffer, with Ivy completion.
+
+PROMPT is a string to prompt with; normally it ends in a colon and a space.
+
+Argument URL is the url of a GitHub gist."
   (interactive)
-  (unless gh-repo-licence-types
-    (setq gh-repo-licence-types
-          (seq-sort-by (lambda (it) (if (equal (gh-repo-get-prop it :value)  "gpl-3.0")
-                                   1
-                                 -1))
-                       '>
-                       (mapcar
-                        (lambda (cell) (let ((value (cdr (assoc 'key cell)))
-                                        (label (cdr (assoc 'name cell))))
-                                    (gh-repo-add-props label :value value)))
-                        (append (gh-repo-load-licences) nil)))))
-  (setq gh-repo--license
-        (gh-repo-get-prop
-         (completing-read "License"
-                          gh-repo-licence-types)
-         :value)))
+  (when (and
+         (require 'ghub nil t)
+         (fboundp 'ghub-continue)
+         (fboundp 'ghub-get)
+         (fboundp 'ivy-update-candidates)
+         (fboundp 'ivy--reset-state)
+         (fboundp 'ivy--exhibit)
+         (boundp 'ivy-text)
+         (boundp 'ivy-exit)
+         (boundp 'ivy-last)
+         (boundp 'ivy--all-candidates)
+         (boundp 'cl-struct-ivy-state-tags)
+         (boundp 'ivy--index)
+         (fboundp 'ivy-read)
+         (fboundp 'ivy-recompute-index-swiper-async)
+         (fboundp 'ivy-configure))
+    (let ((caller this-command))
+      (ivy-configure caller
+        :index-fn #'ivy-recompute-index-swiper-async)
+      (let* ((response (make-hash-table
+                        :test #'equal))
+             (cands)
+             (maxlen 30)
+             (buff (current-buffer))
+             (output-buffer
+              (ghub-get url nil
+                        :query `((per_page . ,gh-repo-default-repos-limit))
+                        :auth (cdr gh-repo-ghub-auth-info)
+                        :username (car gh-repo-ghub-auth-info)
+                        :callback
+                        (lambda (value _headers _status req)
+                          (when (and (active-minibuffer-window)
+                                     (buffer-live-p buff))
+                            (with-current-buffer buff
+                              (let ((names))
+                                (dolist (item value)
+                                  (let ((name (alist-get 'full_name item)))
+                                    (puthash name item response)
+                                    (push name names)))
+                                (setq cands (nreverse names))
+                                (setq maxlen (if
+                                                 cands
+                                                 (apply #'max
+                                                        (mapcar #'length
+                                                                cands))
+                                               30))
+                                (ivy-update-candidates
+                                 cands)))
+                            (let ((input ivy-text)
+                                  (pos
+                                   (when-let ((wind
+                                               (active-minibuffer-window)))
+                                     (with-selected-window
+                                         wind
+                                       (point)))))
+                              (when (active-minibuffer-window)
+                                (with-selected-window (active-minibuffer-window)
+                                  (delete-minibuffer-contents)))
+                              (progn
+                                (or
+                                 (progn
+                                   (and
+                                    (memq
+                                     (type-of ivy-last)
+                                     cl-struct-ivy-state-tags)
+                                    t))
+                                 (signal 'wrong-type-argument
+                                         (list 'ivy-state ivy-last)))
+                                (let* ((v ivy-last))
+                                  (aset v 2 ivy--all-candidates)))
+                              (when (fboundp 'ivy-state-preselect)
+                                (progn
+                                  (or
+                                   (progn
+                                     (and
+                                      (memq
+                                       (type-of ivy-last)
+                                       cl-struct-ivy-state-tags)
+                                      t))
+                                   (signal 'wrong-type-argument
+                                           (list 'ivy-state ivy-last)))
+                                  (let* ((v ivy-last))
+                                    (aset v 7 ivy--index))))
+                              (ivy--reset-state
+                               ivy-last)
+                              (when-let ((wind
+                                          (active-minibuffer-window)))
+                                (with-selected-window
+                                    wind
+                                  (insert input)
+                                  (goto-char
+                                   (when pos
+                                     (if (> pos
+                                            (point-max))
+                                         (point-max)
+                                       pos)))
+                                  (ivy--exhibit)))
+                              (ghub-continue req))))))
+             (annotf (lambda (key)
+                       (when (> (length key) maxlen)
+                         (setq maxlen (1+ (length key))))
+                       (let* ((data (gethash key response))
+                              (annot-str (gh-repo-values-to-columns
+                                          data)))
+                         (concat (make-string (- maxlen (length key)) ?\ )
+                                 " "
+                                 annot-str)))))
+        (unwind-protect
+            (ivy-read prompt
+                      (lambda (str pred action)
+                        (if (eq action 'metadata)
+                            `(metadata
+                              (annotation-function . ,annotf))
+                          (complete-with-action action cands str pred)))
+                      :action (lambda (item)
+                                (if ivy-exit
+                                    item
+                                  (gh-repo-browse item)))
+                      :caller caller)
+          (when (buffer-live-p output-buffer)
+            (let ((message-log-max nil))
+              (with-temp-message (or (current-message) "")
+                (kill-buffer output-buffer)))))))))
 
 ;;;###autoload
-(defun gh-repo-description-read ()
-  "Read a description in the minibuffer, with completion."
+(defun gh-repo-ivy-read-current-user-repo (&optional prompt)
+  "Read a repo in the minibuffer with PROMPT and Ivy completion."
   (interactive)
-  (setq gh-repo--description (read-string
-                              "--description\s"
-                              gh-repo--description)))
+  (when (or (not (car gh-repo-ghub-auth-info))
+            (string-empty-p (car gh-repo-ghub-auth-info)))
+    (gh-repo-read-auth-marker))
+  (gh-repo--ivy-read-repo (or prompt "Repo: ")
+                          (concat "user/repos")))
 
 ;;;###autoload
-(defun gh-repo-read-gitignore-read ()
-  "Read a gitignore template in the minibuffer, with completion."
-  (interactive)
-  (setq gh-repo--gitignore (completing-read
-                            "--gitignore\s"
-                            gh-repo-gitignores)))
-
+(defun gh-repo-ivy-read-other-user-repo (user)
+  "Read a repo of USER in the minibuffer, with Ivy completion."
+  (interactive (read-string "User: "))
+  (when (or (not (car gh-repo-ghub-auth-info))
+            (string-empty-p (car gh-repo-ghub-auth-info)))
+    (gh-repo-read-auth-marker))
+  (gh-repo--ivy-read-repo "Repo: " (concat "users/"
+                                           user
+                                           "/repos")))
 
 (defun gh-repo-read-dir (prompt basename)
   "Read directory with PROMPT and BASENAME."
@@ -571,171 +712,32 @@ Invoke CALLBACK without args."
     (file-name-as-directory
      (completing-read (or prompt "Directory:\s") variants nil nil))))
 
-;;;###autoload
-(defun gh-repo-create-read-repo-name ()
-  "Read a repository name to create."
-  (interactive)
-  (let ((initial-input (or gh-repo--name
-                           (if buffer-file-name
-                               (when buffer-file-name
-                                 (file-name-base buffer-file-name))
-                             (buffer-name)))))
-    (setq gh-repo--name (read-string "Name of repository:\s" initial-input))))
-
-(defun gh-repo-normalize-visiblity-option ()
-  "Return value of `gh-repo--private' converted to --private or --public."
-  (if (or
-       (equal gh-repo--private "--private")
-       (equal gh-repo--private t))
-      "--private"
-    "--public"))
-
-(defun gh-repo-generic-command ()
-  "Return list with gh command and args."
-  (let ((vars '(gh-repo--push
-                gh-repo--disable-wiki
-                gh-repo--disable-issues
-                gh-repo--internal
-                gh-repo--description
-                gh-repo--license
-                gh-repo--gitignore))
-        (flags))
-    (setq flags (mapcar
-                 (lambda (it)
-                   (when-let* ((value (symbol-value it))
-                               (flag
-                                (and value
-                                     (concat "--"
-                                             (car
-                                              (reverse
-                                               (split-string
-                                                (format "%s" it) "--" t)))))))
-                     (cond
-                      ((and (stringp value)
-                            (equal value flag))
-                       flag)
-                      ((stringp value)
-                       (list flag value))
-                      (t flag))))
-                 vars))
-    (setq flags (append flags (list (gh-repo-normalize-visiblity-option))))
-    (when gh-repo--name
-      (flatten-list
-       (append `("gh" "repo" "create" ,gh-repo--name)
-               (delete nil flags))))))
-
-(defun gh-repo-call-process (programm &rest args)
-  "Call PROGRAMM with ARGS and return t if success."
-  (with-temp-buffer
-    (let* ((status (apply #'call-process programm nil t nil
-                          (delq nil (flatten-list
-                                     args))))
-           (res (buffer-string)))
-      (if (eq status 0)
-          res
-        (message res)
-        nil))))
-
-(defun gh-repo-create ()
-  "Create new gh repository and return t if success."
-  (when-let ((cmd (gh-repo-generic-command)))
-    (gh-repo-call-process (car cmd) (cdr cmd))))
-
-
-;;;###autoload
-(defun gh-repo-create-repo ()
-  "Create new repository with gh."
-  (interactive)
-  (while (null gh-repo--name)
-    (setq gh-repo--name (gh-repo-create-read-repo-name)))
-  (when (gh-repo-create)
-    (let ((name gh-repo--name))
-      (setq gh-repo--name nil)
-      (when (yes-or-no-p (format "Clone repo %s?" name))
-        (gh-repo-clone-repo name)))))
-
-(defun gh-repo-view-repo (repo)
-  "View REPO in help buffer fontified with org mode or markdown mode.
-Org mode detected by #+begin_ blocks."
-  (let* ((body
-          (with-temp-buffer
-            (shell-command
-             (concat "gh repo view " repo)
-             (current-buffer)
-             (current-buffer))
-            (let ((mode (if (re-search-forward
-                             (regexp-quote "#+begin_") nil t 1)
-                            'org-mode
-                          'markdown-mode)))
-              (gh-repo-fontify (buffer-substring-no-properties
-                                (point-min) (point-max))
-                               mode))))
-         (buffer (with-current-buffer (get-buffer-create "*gh-repo*")
-                   (setq buffer-read-only t)
-                   (let ((inhibit-read-only t))
-                     (erase-buffer)
-                     (save-excursion
-                       (insert body)))
-                   (local-set-key (kbd "q") #'quit-window)
-                   (current-buffer))))
-    (display-buffer buffer t)
-    (if help-window-select
-        (progn
-          (pop-to-buffer buffer)
-          (message "Type \"q\" to restore previous buffer"))
-      (message (concat "Type \"q\" to exit")))))
-
-(defun gh-repo-fetch-repos (&rest flags)
-  "Execute gh repo list with FLAGS.
-Return list with user repositories.
-
-Each item is propertized with :type (private or public) and :description."
-  (setq flags (delete nil (flatten-list flags)))
-  (delete nil
-          (mapcar
-           (lambda (it)
-             (when-let* ((parts (split-string it nil t))
-                         (name (pop parts)))
-               (gh-repo-add-props
-                name
-                :description (substring-no-properties it (length name))
-                :type (if (member "private" parts)
-                          "private"
-                        "public"))))
-           (split-string
-            (gh-repo-exec (if flags
-                              (concat "gh repo list "
-                                      (mapconcat
-                                       (apply-partially #'format "%s")
-                                       flags "\s"))
-                            "gh repo list"))
-            "\n"))))
-
-(defvar gh-repo-repos-limit gh-repo-default-repos-limit)
-(defvar gh-repo-user-repos nil)
-
-(defun gh-repo-annotate-repo (repo)
-  "Fontify REPO :description text property depending on :type."
-  (if-let* ((type  (gh-repo-get-prop repo :type))
-            (face (if (equal type "public")
-                      font-lock-keyword-face
-                    font-lock-builtin-face)))
-      (concat "\s" (propertize (or (gh-repo-get-prop repo :description)
-                                   "")
-                               'face
-                               face))
-    ""))
+(defun gh-repo--confirm-url (name)
+  "Convert repo NAME to ssh format and read it from minibuffer."
+  (let ((variants (gh-repo-util-get-ssh-variants
+                   (cond ((string-prefix-p "https://" name)
+                          (gh-repo-util-url-https-to-ssh name))
+                         ((gh-repo-util-ssh-url-p name)
+                          name)
+                         (t (gh-repo-util-url-https-to-ssh
+                             (concat "https://github.com/"
+                                     name)))))))
+    (if (> (length variants)
+           1)
+        (completing-read "git clone\s" variants)
+      (car variants))))
 
 ;;;###autoload
 (defun gh-repo-clone-repo (name)
   "Read target directory from minibuffer and clone repository NAME."
-  (interactive)
+  (interactive (list (gh-repo-read-user-repo "Clone repository: "
+                                             #'identity)))
   (if-let* ((basename (car (reverse (split-string name "/" t))))
             (project-dir (gh-repo-read-dir
-                          (format "Clone %s to " basename) basename)))
+                          (format "Clone %s to " basename) basename))
+            (url (gh-repo--confirm-url name)))
       (let ((command (read-string "" (string-join
-                                      (list "gh" "repo" "clone" name
-                                            project-dir)
+                                      (list "git" "clone" url project-dir)
                                       "\s"))))
         (setq project-dir (expand-file-name
                            (car (reverse (split-string command)))))
@@ -746,92 +748,42 @@ Each item is propertized with :type (private or public) and :description."
                                    (run-hooks 'gh-repo-after-create-repo-hook))))))
     (message "Cannot clone %s" name)))
 
-(defun gh-repo-remove (repo)
-  "Ask user a \"y or n\" question and remove gh REPO if y."
-  (when (and (stringp repo)
-             (not (string-empty-p (string-trim repo)))
-             (yes-or-no-p (format "Remove %s?" repo)))
-    (gh-repo-call-process "gh" "auth" "refresh" "-s" "delete_repo")
-    (message (shell-command-to-string
-              (concat "gh repo delete "
-                      repo
-                      " --confirm")))))
+(defun gh-repo-remove-request (fullname)
+  "Remove a GitHub repository request.
 
-(defun gh-repo-visit (repo)
+Remove a repository request with the given FULLNAME."
+  (ghub-delete (concat "/repos/" fullname) nil
+               :auth (cdr gh-repo-ghub-auth-info)
+               :username (car gh-repo-ghub-auth-info)
+               :callback
+               (lambda (_value &rest _)
+                 (message "Repository %s removed" fullname))))
+
+;;;###autoload
+(defun gh-repo-delete (fullname)
+  "Remove a repository request with the given FULLNAME."
+  (interactive (list (gh-repo-read-user-repo "Delete repo: "
+                                             #'identity)))
+  (unless (string-empty-p fullname)
+    (when (yes-or-no-p (format "Really remove %s repo?"
+                               fullname))
+      (gh-repo-remove-request fullname))))
+
+
+(defun gh-repo-browse (repo)
   "Visit github REPO."
   (browse-url
    (if (string-match-p "^https://" repo)
        repo
      (concat "https://github.com/" repo))))
 
-;;;###autoload
-(defun gh-repo-switch-to-hydra ()
-  "During active minibuffer completion just exit it.
-During inactive minibuffer call `gh-repo-hydra/body'."
-  (interactive)
-  (if (active-minibuffer-window)
-      (exit-minibuffer)
-    (gh-repo-hydra/body)))
 
 ;;;###autoload
-(defun gh-repo-change-repos-limit ()
-  "During active minibuffer completion just exit it.
-During inactive minibuffer read value for `gh-repo-repos-limit',
-and invoke `gh-repo-read-user-repo'."
+(defun gh-repo-read-user-repo (&optional prompt action)
+  "Read user repository with PROMPT and execute ACTION.
+If ACTION is nil read it from `gh-repo-actions'."
   (interactive)
-  (if (active-minibuffer-window)
-      (exit-minibuffer)
-    (setq gh-repo-repos-limit
-          (read-number "gh repo list --limit\s"))
-    (gh-repo-read-user-repo)))
-
-(defun gh-repo--read-user-repo ()
-  "Read user repository with completions.
-You can change limit in minibuffer with \\<gh-repo-minibuffer-map>\ `\\[gh-repo-change-repos-limit]'."
-  (setq gh-repo-user-repos
-        (if gh-repo-repos-limit
-            (gh-repo-fetch-repos
-             (format "--limit %s"
-                     gh-repo-repos-limit))
-          (gh-repo-fetch-repos)))
-  (minibuffer-with-setup-hook
-      (lambda () (use-local-map
-             (let ((map (copy-keymap gh-repo-minibuffer-map)))
-               (set-keymap-parent map (current-local-map))
-               map)))
-    (let ((minibuffer-help-form
-           (substitute-command-keys
-            "\\<gh-repo-minibuffer-map>\ `\\[gh-repo-change-repos-limit]' - to change number of displayed repositories,\n`\\[gh-repo-switch-to-hydra]' switch to hydra")))
-      (completing-read "Repository:\s"
-                       (lambda (str pred action)
-                         (if (eq action 'metadata)
-                             `(metadata
-                               (annotation-function . gh-repo-annotate-repo))
-                           (complete-with-action
-                            action gh-repo-user-repos str pred)))))))
-
-;;;###autoload
-(defun gh-repo-read-user-repo (&optional action)
-  "Read user repository and execute ACTION.
-If ACTION is nil read it from `gh-repo-actions'.
-
-During minibuffer completion next commands are available:
-
-\\<gh-repo-minibuffer-map>\ `\\[gh-repo-change-repos-limit]' -
-to change number of displayed repositories,
-`\\[gh-repo-switch-to-hydra]' switch to hydra."
-  (interactive)
-  (setq gh-repo-current-user (or gh-repo-current-user
-                                 (gh-repo-get-current-user)))
-  (let ((repo (gh-repo--read-user-repo)))
-    (pcase this-command
-      ('gh-repo-change-repos-limit
-       (setq repo nil)
-       (setq gh-repo-repos-limit
-             (read-number "gh repo list --limit\s"))
-       (gh-repo-read-user-repo))
-      ('gh-repo-switch-to-hydra (gh-repo-hydra/body)
-                                (setq repo nil)))
+  (let ((repo (gh-repo-ivy-read-current-user-repo prompt)))
     (when repo
       (if action
           (funcall action repo)
@@ -843,116 +795,121 @@ to change number of displayed repositories,
               (funcall (nth 2 choice) repo)
             choice))))))
 
-(defun gh-repo-read-predefined-template ()
-  "Read saved template from `gh-repo-predefined-templates'.
-Return plist with it's options."
-  (if (not gh-repo-predefined-templates)
-      (when (yes-or-no-p "No predefined templates found. Create?")
-        (customize-option-other-window 'gh-repo-predefined-templates))
-    (cdr
-     (assoc (completing-read "Template: " gh-repo-predefined-templates)
-            gh-repo-predefined-templates))))
+;;;###autoload
+(defun gh-repo-clone-other-user-repo (name)
+  "Clone other user's NAME repository."
+  (interactive (list (gh-repo-ivy-read-other-user-repo
+                      (read-string "Username: "))))
+  (gh-repo-clone-repo name))
+
+
+(defvar gh-repo-licences nil)
+(defvar gh-repo-gitignore-templates nil)
+
+(defcustom gh-repo-default-arguments '("--private"
+                                       "--license_template=gpl-3.0"
+                                       "--has_wiki"
+                                       "--has_projects"
+                                       "--has_downloads"
+                                       "--has_issues")
+  "Initial arguments for `gh-repo-menu'."
+  :type '(repeat string)
+  :group 'gh-repo)
+
+
+(defun gh-repo-argument-to-cell (arg)
+  "Parse transient argument ARG to cons cell."
+  (cond ((string-match-p "^--\\([a-z_]+\\)=" arg)
+         (pcase-let ((`(,key . ,value)
+                      (split-string arg "=" t)))
+           (setq key (substring-no-properties key (length "--")))
+           (setq value (string-join value "="))
+           (cons key value)))
+        (t (cons (substring-no-properties arg (length "--")) t))))
+
+
+
+(defun gh-repo-post-request (payload)
+  "Send a POST request with PAYLOAD to create a repository on GitHub."
+  (require 'ghub)
+  (when (fboundp 'ghub-post)
+    (ghub-post "/user/repos" nil
+               :payload payload
+               :auth (cdr gh-repo-ghub-auth-info)
+               :username (car gh-repo-ghub-auth-info)
+               :callback
+               (lambda (value &rest _)
+                 (if
+                     (yes-or-no-p (format "Clone repo %s?" (alist-get
+                                                            'full_name value)))
+                     (gh-repo-clone-repo (alist-get 'full_name value))
+                   (message "Repository created."))))))
 
 ;;;###autoload
-(defun gh-repo-save-current-options ()
-  "Save current options to `gh-repo-predefined-templates'."
+(defun gh-repo-create-repo (args)
+  "Create a new repository from transient arguments ARGS."
+  (interactive (list (transient-args transient-current-command)))
+  (let ((obj (mapcar #'gh-repo-argument-to-cell args)))
+    (while (or (not (cdr (assoc-string "name" obj)))
+               (string-empty-p
+                (cdr (assoc-string "name" obj))))
+      (let* ((name (read-string "Name of the repository: "))
+             (new-cell (cons "name" name)))
+        (setq obj (assoc-delete-all "name" obj))
+        (setq obj (push new-cell obj))))
+    (gh-repo-post-request obj)))
+
+;;;###autoload (autoload 'gh-repo-menu "gh-repo" nil t)
+(transient-define-prefix gh-repo-menu ()
+  "Command dispatcher for GitHub repositories."
+  :value
+  (lambda ()
+    gh-repo-default-arguments)
+  ["New repository arguments"
+   ("n" "name" "--name=")
+   ("d" "description" "--description=" :class transient-option)
+   ("p" "private" "--private")
+   ("l" "license_template" "--license_template="
+    :class transient-option
+    :choices (lambda (&rest _)
+               (unless gh-repo-licences
+                 (setq gh-repo-licences (gh-repo-load-licences)))
+               (mapcar (apply-partially #'alist-get 'key) gh-repo-licences)))
+   ("g" "gitignore_template" "--gitignore_template="
+    :class transient-option
+    :choices (lambda (&rest _)
+               (unless gh-repo-gitignore-templates
+                 (setq gh-repo-gitignore-templates (append (gh-repo-load-gitignore-templates) nil)))
+               gh-repo-gitignore-templates))
+   ("t" "template repository" "--is_template")
+   ("i" "has_issues" "--has_issues")
+   ("P" "projects" "--has_projects")
+   ("w" "wiki" "--has_wiki")
+   ("L" "downloads" "--has_downloads")
+   ("s" "discussions" "--has_discussions")]
+  ["Config"
+   ("u" gh-repo-change-user
+    :description (lambda ()
+                   (concat  "Github User: "
+                            (if
+                                (or (not (car gh-repo-ghub-auth-info))
+                                    (string-empty-p (car
+                                                     gh-repo-ghub-auth-info))
+                                    (not (cdr gh-repo-ghub-auth-info)))
+                                "(not logged)"
+                              (propertize
+                               (substring-no-properties
+                                (car
+                                 gh-repo-ghub-auth-info))
+                               'face 'transient-value)))))]
+  ["Actions"
+   ("o" "Clone other user repo" gh-repo-clone-other-user-repo)
+   ("c" "Clone my repo" gh-repo-clone-repo)
+   ("R" "Remove my repo" gh-repo-delete)
+   ("RET" "Create" gh-repo-create-repo)]
   (interactive)
-  (let ((template-name (read-string "Template name: "))
-        (pl '())
-        (vars '(gh-repo--push
-                gh-repo--private
-                gh-repo--disable-wiki
-                gh-repo--disable-issues
-                gh-repo--internal
-                gh-repo--description
-                gh-repo--license
-                gh-repo--gitignore))
-        (result))
-    (dolist (var vars)
-      (when-let ((value (pcase var
-                          ('gh-repo--private
-                           (let ((val (symbol-value var)))
-                             (if (stringp val)
-                                 val
-                               (if val "--private" "--public"))))
-                          (_ (symbol-value var)))))
-        (setq pl (plist-put pl var value))))
-    (setq result (cons template-name pl))
-    (if-let ((cell (assoc template-name gh-repo-predefined-templates)))
-        (setcdr cell pl)
-      (add-to-list 'gh-repo-predefined-templates result))
-    (when (yes-or-no-p (format "Customize save %s?"
-                               'gh-repo-predefined-templates))
-      (customize-save-variable
-       'gh-repo-predefined-templates
-       (symbol-value
-        'gh-repo-predefined-templates)))))
+  (transient-setup #'gh-repo-menu))
 
-
-(defun gh-repo-command-hint ()
-  "Return hint with current gh repo command."
-  (string-join (gh-repo-generic-command) "\s"))
-
-;;;###autoload
-(defun gh-repo-use-predefined-template ()
-  "Read and populate saved options from `gh-repo-predefined-templates'."
-  (interactive)
-  (when-let ((pl (gh-repo-read-predefined-template))
-             (vars '(gh-repo--push
-                     gh-repo--private
-                     gh-repo--disable-wiki
-                     gh-repo--disable-issues
-                     gh-repo--internal
-                     gh-repo--description
-                     gh-repo--license
-                     gh-repo--gitignore)))
-    (dolist (var vars)
-      (set var (plist-get pl var)))))
-
-
-(defhydra gh-repo-hydra (:color pink
-                                :pre
-                                (progn
-                                  (unless gh-repo-current-user
-                                    (setq gh-repo-current-user
-                                          (gh-repo-get-current-user)))))
-  (concat "\n" "Create new repository options.
-
-_n_ ame                                %`gh-repo--name
-_u_ change [u]ser                      %`gh-repo-current-user
-_p_ [p]rivate or [p]ublic              %`gh-repo--private
-_P_ toggle --push                      %`gh-repo--push
-_w_ disable wiki                       %`gh-repo--disable-wiki
-_i_ disable issues                     %`gh-repo--disable-issues
-_I_ make [I]nternal                    %`gh-repo--internal
-_d_ description                        %`gh-repo--description
-_l_ specify license                    %`gh-repo--license
-_g_ specify [g]itignore template       %`gh-repo--gitignore
-
-_C_ run [C]ommand                      %(gh-repo-command-hint)
-
-Saved options:
-_t_ use [t]emplate                     set options from saved template
-_s_ [s]ave current options             save current options for future settings
-
-
-Existing repositories:
-_C->_ show all my repos")
-  ("n" gh-repo-create-read-repo-name nil)
-  ("u" gh-repo-change-user nil)
-  ("p" gh-repo--private-toggle nil)
-  ("P" gh-repo--push-toggle nil)
-  ("w" gh-repo--disable-wiki-toggle nil)
-  ("i" gh-repo--disable-issues-toggle nil)
-  ("I" gh-repo--internal-toggle nil)
-  ("d" gh-repo-description-read nil)
-  ("l" gh-repo-read-license nil)
-  ("g" gh-repo-read-gitignore-read nil)
-  ("C" gh-repo-create-repo nil :exit t)
-  ("t" gh-repo-use-predefined-template nil)
-  ("s" gh-repo-save-current-options nil)
-  ("C->" gh-repo-read-user-repo nil :exit t)
-  ("q" nil "quit"))
 
 (provide 'gh-repo)
 ;;; gh-repo.el ends here

@@ -1,129 +1,90 @@
-* gh-repo
+#+OPTIONS: ^:nil tags:nil
 
-Create and manage gh repositories.
+* About
 
-** Prerequisites
-- [[https://cli.github.com/manual/][GitHub CLI]]
-- [[https://github.com/tkf/emacs-request][emacs-request]]
-- [[https://github.com/abo-abo/hydra][hydra]]
-- [[https://github.com/sharkdp/fd][fd]] or find (optional)
-- [[https://magit.vc/manual/forge/Token-Creation.html#Token-Creation][Github API token]]
+Create and manage Github repositories.
 
-GH token is required with =:host= *api.github.com* in ~auth-sources~ (usually it is =~/.authinfo= or =~/.authinfo.gpg=), e.g.:
+[[./gh-repo-demo.png]]
 
-#+begin_example
-machine api.github.com login my-gh-username password my-gh-token
-#+end_example
 
-Multiple users are allowed. For example:
 
-#+begin_example
-machine api.github.com login github-username-1 password gh-token-password-for-user1
-machine api.github.com login github-username-2 password gh-token-password-for-user2
-#+end_example
+* Table of Contents                                       :TOC_2_gh:QUOTE:
+#+BEGIN_QUOTE
+- [[#about][About]]
+- [[#requirements][Requirements]]
+- [[#installation][Installation]]
+  - [[#with-use-package-and-straightel][With use-package and straight.el]]
+  - [[#manual-installation][Manual installation]]
+  - [[#auth][Auth]]
+  - [[#usage][Usage]]
+#+END_QUOTE
 
-And then you can change user with command ~gh-repo-change-user~.
+* Requirements
 
-** Installation
+| Name        | Version |
+|-------------+---------|
+| Emacs       |    29.1 |
+| ~request~   |   0.3.2 |
+| ~transient~ |   0.4.1 |
+| ~ghub~      |   3.6.0 |
+| ~ivy~       |  0.14.0 |
 
-*** Manually
 
-Download repository and it to your load path in your init file:
+* Installation
+
+** With use-package and straight.el
+#+begin_src elisp :eval no
+(use-package gh-repo
+  :straight (gh-repo
+             :repo "KarimAziev/gh-repo"
+             :type git
+             :host github)
+  :commands (gh-repo-menu)
+  :config
+  (setq gh-repo-ghub-auth-info '("YOUR_GITHUB_USERNAME" . gh-repo)))
+#+end_src
+
+** Manual installation
+
+Download the source code and put it wherever you like, e.g. into =~/.emacs.d/gh-repo/=
+
+#+begin_src shell :eval no
+git clone https://github.com/KarimAziev/gh-repo.git ~/.emacs.d/gh-repo/
+#+end_src
+
+Add the downloaded directory to the load path:
 
 #+begin_src elisp :eval no
-
-(add-to-list 'load-path "/path/to/gh-repo/")
-
+(add-to-list 'load-path "~/.emacs.d/gh-repo/")
 (require 'gh-repo)
-
 #+end_src
 
-*** With use-package and straight
+** Auth
+=gh-repo= manages authentication through customizable variable =gh-repo-ghub-auth-info=:
 
-#+begin_src elisp :eval no
+This a cons cell, which car is a string containing your GitHub username and cdr is either a string containing the OAuth token or a symbol indicating where to fetch the OAuth token.
 
-(use-package gh-repo
-  :straight (:repo "KarimAziev/gh-repo" :type git :host github)
-  :bind (("C-c k g" . gh-repo-hydra/body)
-         ("C-c k r" . gh-repo-read-user-repo)))
-
-#+end_src
-
-** Commands
-+ ~gh-repo-hydra/body~
-
-Hydra for creating and configuring new repository.
-
-| Key | Description                                                           |
-|-----+-----------------------------------------------------------------------|
-| n   | name for new repository                                               |
-| u   | change gh user                                                        |
-| p   | toggle visibility (--private or --public)                             |
-| P   | toggle --push                                                         |
-| w   | disable wiki                                                          |
-| i   | disable issues                                                        |
-| I   | make new repository internal                                          |
-| d   | specify description for repository                                    |
-| l   | specify Open Source license                                           |
-| g   | specify gitignore template                                            |
-| C   | create repository with current options                                |
-| t   | set options from saved templates (see ~gh-repo-predefined-templates~) |
-| s   | save current options for future settings                              |
-
-
-+ ~gh-repo-read-user-repo~
-Read user repository and prompt and execute one of the action from ~gh-repo-actions~. During minibuffer completion next commands are available:
-
-| Default Key | Command description                      |
-|-------------+------------------------------------------|
-| M-<up>      | change number of repositories to display |
-| C->         | exit minibuffer and switch to hydra      |
-
-To change default keybinding modify ~gh-repos-minibuffer-map~, e.g.:
+For example, if your github username is =YOUR_GITHUB_USERNAME= is should be:
 
 #+begin_src emacs-lisp
-(require 'gh-repo)
-(define-key gh-repos-minibuffer-map (kbd "C-]") 'gh-repo-switch-to-hydra)
-(define-key gh-repos-minibuffer-map (kbd "C-c C-l") 'gh-repo-change-repos-limit)
+(setq gh-repo-ghub-auth-info '("YOUR_GITHUB_USERNAME" . gh-repo))
 #+end_src
 
-Or if you use use-package and straight:
+Next, add an entry to your =auth-sources=:
 
-#+begin_src emacs-lisp
-
-(use-package gh-repo
-  :straight (:repo "KarimAziev/gh-repo" :type git :host github)
-  :bind (("C-c k g" . gh-repo-hydra/body)
-         ("C-c k r" . gh-repo-read-user-repo)
-         (:map gh-repos-minibuffer-map
-               ("C-c C-l" . gh-repo-change-repos-limit)
-               ("C-]" . gh-repo-switch-to-hydra))))
+#+begin_src plaintext
+machine api.github.com login YOUR-GITHUB-USERNAME^gh-repo password YOUR-GITHUB-TOKEN
 #+end_src
 
-
-** Customization
-
-+ ~gh-repo-actions~
-
-Default actions for ~gh-repo-read-user-repo~ includes cloning, browsing, viewing and removing.
-
-You can add your own actions by customizing the variable ~gh-repo-actions~.
-
-Your action should accept one argument - repository name. For example
-
-#+begin_src emacs-lisp :eval no
-(defun my-gh-action (name)
-  (browse-url (concat "https://github.com/" name)))
-
-(add-to-list 'gh-repo-actions '(?o "open in browser" my-gh-action))
-#+end_src
-
-+ ~gh-repo-default-repos-limit~
-
-Initial value for maximum number of repositories to load during minibuffer completion with ~gh-repo-read-user-repo~.
-
-+ ~gh-repo-predefined-templates~
-Alist of template names and saved options. To use some template call command ~gh-repo-use-predefined-template~.
-
-+ ~gh-repo-default-license~
-Default repository license for new repositories.
+You can add this entry to your =~/.authinfo.gpg= file (recommended for secure, encrypted storage) or =~/.authinfo= (see variable =auth-sources=).
+** Usage
+~M-x gh-repo-menu~
+This is a command dispatcher for GitHub repositories:
+*** ~gh-repo-create-repo~  (args)
+Create a new repository from transient arguments =args=.
+*** ~gh-repo-clone-other-user-repo~  (name)
+Clone other user's =name= repository.
+*** ~gh-repo-delete~  (fullname)
+Remove a repository request with the given =fullname=.
+*** ~gh-repo-clone-repo~  (name)
+Read target directory from minibuffer and clone repository =name=.
