@@ -341,7 +341,7 @@ Default value for DIR is home directory."
         (setq projects
               (if (file-exists-p (concat dir "/.git"))
                   (push (concat dir "/.git") projects)
-                (nconc (gh-repo-project-expand-wildcards "*/.git" dir
+                (nconc (gh-repo-project-expand-wildcards "\\*/.git" dir
                                                          (1- depth))
                        projects)))))
     (mapcar (lambda (dir)
