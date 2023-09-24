@@ -564,6 +564,7 @@ Argument URL is the url of a GitHub gist."
              (cands)
              (maxlen 30)
              (buff (current-buffer))
+             (done)
              (output-buffer
               (ghub-get url nil
                         :query `((per_page . ,gh-repo-default-repos-limit))
@@ -572,7 +573,8 @@ Argument URL is the url of a GitHub gist."
                         :callback
                         (lambda (value _headers _status req)
                           (when (and (active-minibuffer-window)
-                                     (buffer-live-p buff))
+                                     (buffer-live-p buff)
+                                     (not done))
                             (with-current-buffer buff
                               (let ((names))
                                 (dolist (item value)
@@ -580,8 +582,7 @@ Argument URL is the url of a GitHub gist."
                                     (puthash name item response)
                                     (push name names)))
                                 (setq cands (nreverse names))
-                                (setq maxlen (if
-                                                 cands
+                                (setq maxlen (if cands
                                                  (apply #'max
                                                         (mapcar #'length
                                                                 cands))
@@ -658,6 +659,8 @@ Argument URL is the url of a GitHub gist."
                                 (if ivy-exit
                                     item
                                   (gh-repo-browse item)))
+                      :unwind (lambda ()
+                                (setq done t))
                       :caller caller)
           (when (buffer-live-p output-buffer)
             (let ((message-log-max nil))
