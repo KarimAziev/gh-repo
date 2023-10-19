@@ -36,10 +36,101 @@
   (require 'subr-x))
 (require 'ghub)
 (require 'shell)
-
+(require 'comint)
+(require 'request)
+(require 'auth-source)
 (require 'transient)
+
+(defcustom gh-repo-excluded-dirs '("~/Dropbox"
+                                   "~/melpa"
+                                   "~/.cache"
+                                   "~/.cask")
+  "List of directories to exlude from directories to clone."
+  :group 'gh-repo
+  :type '(repeat directory))
+
+(defcustom gh-repo-default-license "gpl-3.0"
+  "Default repository license."
+  :type 'string
+  :group 'gh-repo)
+
+(defcustom gh-repo-ghub-auth-info '("" . gh-repo)
+  "String of USERNAME^MARKER in auth sources."
+  :type '(radio
+          (cons :tag "Cons cell"
+                (string :tag "Github Username")
+                (radio
+                 :tag "Marker"
+                 (symbol :tag "Suffix" gh-repo)
+                 (string :tag "OAuth Token")))
+          (function-item  :tag "Use gh cli" gh-repo-auth-from-gh-config)
+          (function :tag "Custom Function"))
+  :group 'gh-repo)
+
+(defcustom gh-repo-download-default-repo-dir 'gh-repo-find-clone-directories
+  "Default directory to use when `gh-repo' reads destination."
+  :group 'gh-repo
+  :type '(radio (repeat
+                 :tag "Directory list"
+                 :value ("~/") directory)
+                (directory :tag "Directory")
+                (function-item  :tag "Auto" gh-repo-find-clone-directories)
+                (function :tag "Custom Function")))
+
+(defcustom gh-repo-default-repos-limit 30
+  "How many repositories to load during completion `gh-repo-read-user-repo'."
+  :type 'integer
+  :group 'gh-repo)
+
+(defcustom gh-repo-browse-function 'browse-url
+  "Function for browsing preview page.
+
+It will be called with one argument - url to open.
+
+Default value is to use xwidgets if available, othervise `browse-url'."
+  :type '(radio  (function-item gh-repo--browse-with-xwidget)
+                 (function-item browse-url)
+                 (function :tag "Custom function"))
+  :group 'gh-repo)
+
+(defcustom gh-repo-actions '((?c "clone" gh-repo-clone-repo)
+                             (?b "browse" gh-repo-browse)
+                             (?e "open with github explorer"
+                                 gh-repo-run-github-explorer))
+  "Actions for `gh-repo-read-user-repo'.
+
+Each element is a list comprising (KEY LABEL ACTION)
+
+KEY is a character for `read-multiple-choice', and LABEL is a
+string which describes an action.
+
+ACTION is a a function which should accept one argument
+- repository of user name."
+  :type '(alist
+          :key-type (character
+                     :tag "Key"
+                     :value ?c)
+          :value-type (list (string
+                             :tag "Label"
+                             :value "<description>")
+                            (function :tag "Function")))
+  :group 'gh-repo)
+
+(defcustom gh-repo-annotation-spec-alist '((description "%s" 40)
+                                           (visibility "👁️%s" 20)
+                                           (stargazers_count "⭐%s" 10)
+                                           (open_issues "⁉️%s" 10))
+  "Alist of symbol, format string and width for displaying a GitHub repository."
+  :group 'gh-repo
+  :type '(alist
+          :key-type symbol
+          :value-type (list
+                       (string :tag "Column Name" "%s")
+                       (integer :tag "Column Width" 20))))
+
 (defvar gh-repo--search-langs-alist nil)
 (defvar gh-repo--search-langs nil)
+(defvar gh-repo--cached-auth-data nil)
 
 (defun gh-repo--download-url (url)
   "Download URL and return string."
@@ -107,91 +198,6 @@ represent a JSON false value.  It defaults to `:false'."
           'alist
           'list))))
 
-
-(defcustom gh-repo-excluded-dirs '("~/Dropbox"
-                                   "~/melpa"
-                                   "~/.cache"
-                                   "~/.cask")
-  "List of directories to exlude from directories to clone."
-  :group 'gh-repo
-  :type '(repeat directory))
-
-(defcustom gh-repo-default-license "gpl-3.0"
-  "Default repository license."
-  :type 'string
-  :group 'gh-repo)
-
-(defcustom gh-repo-ghub-auth-info '("" . gh-repo)
-  "String of USERNAME^MARKER in auth sources."
-  :type '(cons :tag "Auth" (string :tag "Github Username")
-               (radio
-                :tag "Marker"
-                (symbol :tag "Suffix" gh-repo)
-                (string :tag "OAuth Token")))
-  :group 'gh-repo)
-
-(defcustom gh-repo-download-default-repo-dir 'gh-repo-find-clone-directories
-  "Default directory to use when `gh-repo' reads destination."
-  :group 'gh-repo
-  :type '(radio (repeat
-                 :tag "Directory list"
-                 :value ("~/") directory)
-                (directory :tag "Directory")
-                (function-item  :tag "Auto" gh-repo-find-clone-directories)
-                (function :tag "Custom Function")))
-
-(defcustom gh-repo-default-repos-limit 30
-  "How many repositories to load during completion `gh-repo-read-user-repo'."
-  :type 'integer
-  :group 'gh-repo)
-
-(defcustom gh-repo-browse-function 'browse-url
-  "Function for browsing preview page.
-
-It will be called with one argument - url to open.
-
-Default value is to use xwidgets if available, othervise `browse-url'."
-  :type '(radio  (function-item gh-repo--browse-with-xwidget)
-                 (function-item browse-url)
-                 (function :tag "Custom function"))
-  :group 'gh-repo)
-
-(defcustom gh-repo-actions '((?c "clone" gh-repo-clone-repo)
-                             (?b "browse" gh-repo-browse)
-                             (?e "open with github explorer" gh-repo-run-github-explorer))
-  "Actions for `gh-repo-read-user-repo'.
-
-Each element is a list comprising (KEY LABEL ACTION)
-
-KEY is a character for `read-multiple-choice', and LABEL is a
-string which describes an action.
-
-ACTION is a a function which should accept one argument
-- repository of user name."
-  :type '(alist
-          :key-type (character
-                     :tag "Key"
-                     :value ?c)
-          :value-type (list (string
-                             :tag "Label"
-                             :value "<description>")
-                            (function :tag "Function")))
-  :group 'gh-repo)
-
-(defcustom gh-repo-annotation-spec-alist '((description "%s" 40)
-                                           (visibility "👁️%s" 20)
-                                           (stargazers_count "⭐%s" 10)
-                                           (open_issues "⁉️%s" 10))
-  "Alist of symbol, format string and width for displaying a GitHub repository."
-  :group 'gh-repo
-  :type '(alist
-          :key-type symbol
-          :value-type (list
-                       (string :tag "Column Name" "%s")
-                       (integer :tag "Column Width" 20))))
-(require 'comint)
-(require 'request)
-(require 'auth-source)
 
 (defvar gh-repo-util-host-regexp
   (concat "\\("
@@ -353,7 +359,8 @@ With optional argument SSH-HOST also replace host."
                                                      ssh-url)))
                  (let ((beg (point))
                        (end))
-                   (setq end (re-search-forward gh-repo-util-host-regexp nil t 1))
+                   (setq end (re-search-forward
+                              gh-repo-util-host-regexp nil t 1))
                    (cons (buffer-substring-no-properties beg end)
                          (string-trim (buffer-substring-no-properties
                                        end
@@ -433,9 +440,6 @@ Default value for DIR is home directory."
 (defun gh-repo--browse-with-xwidget (url)
   "Visit an URL in xwidget in other window."
   (require 'xwidget)
-  (message "gh-repo--browse-with-xwidget
-            | Url  | %s"
-           url)
   (let ((orig-wind (selected-window)))
     (with-selected-window
         (if (minibuffer-window-active-p orig-wind)
@@ -506,7 +510,7 @@ Invoke CALLBACK without args."
 (defun gh-repo--auth-source-get (keys &rest spec)
   "Retrieve authentication data for GitHub repositories.
 
-Argument KEYS is a list of KEYS for which values are to be retrieved from
+Argument KEYS is a list of keys for which values are to be retrieved from
 the authentication source.
 
 Optional argument SPEC is a variable argument list that specifies the
@@ -518,30 +522,58 @@ search criteria for the authentication source."
               (plist-get plist k))
             keys)))
 
-(defun gh-repo-authenticate ()
-  "Authenticate a GitHub repository using stored user credentials."
-  (pcase-let ((`(,username . ,marker) gh-repo-ghub-auth-info))
-    (if (or (not username)
-            (string-empty-p username))
-        (gh-repo-read-auth-marker)
-      (let* ((user (format "%s^%s" username marker))
-             (token
-              (or (car (gh-repo--auth-source-get (list :secret)
-                         :host "api.github.com"
-                         :user user))
-                  (auth-source-forget (list
-                                       :host "api.github.com"
-                                       :user user
-                                       :max 1)))))
-        (if (functionp token)
-            (funcall token) token)))))
+(defun gh-repo-authenticate (&optional force)
+  "Authenticate a GitHub repository, optionally forcing a `re-authentication'.
+
+Optional argument FORCE is a boolean.
+If non-nil, it forces the function to re-authenticate by clearing the cached
+authentication data.
+The default value is nil."
+  (when force (setq gh-repo--cached-auth-data nil))
+  (or gh-repo--cached-auth-data
+      (setq gh-repo--cached-auth-data
+            (pcase gh-repo-ghub-auth-info
+              ((pred functionp)
+               (funcall gh-repo-ghub-auth-info))
+              (`((and ,username
+                      (stringp ,username)
+                      (not (string-empty-p ,username)))
+                 .
+                 (and ,marker
+                      (symbolp ,marker)
+                      ,marker))
+               (let* ((user (format "%s^%s" username marker))
+                      (token
+                       (or (car (gh-repo--auth-source-get (list :secret)
+                                  :host "api.github.com"
+                                  :user user))
+                           (auth-source-forget (list
+                                                :host "api.github.com"
+                                                :user user
+                                                :max 1)))))
+                 (cons username
+                       (if (functionp token)
+                           (funcall token)
+                         token))))
+              (`((and ,username
+                      (stringp ,username)
+                      (not (string-empty-p ,username)))
+                 .
+                 (and ,marker
+                      (stringp ,marker)
+                      ,marker))
+               (cons username marker))
+              (_ (gh-repo-read-auth-marker))))))
+
 
 
 ;;;###autoload
 (defun gh-repo-change-user ()
   "Search for gh token in `auth-sources'."
   (interactive)
-  (gh-repo-read-auth-marker)
+  (if gh-repo--cached-auth-data
+      (setq gh-repo-ghub-auth-info nil)
+    (gh-repo-authenticate t))
   (when transient-current-command
     (transient-setup transient-current-command)))
 
@@ -555,8 +587,8 @@ search criteria for the authentication source."
                 :require '(:user :secret)
                 :max most-positive-fixnum)
                (lambda (a b)
-                 (equal (gh-repo-auth-info-password a)
-                        (gh-repo-auth-info-password b))))))
+                 (equal (auth-info-password a)
+                        (auth-info-password b))))))
     (pcase-let* ((users (seq-filter (apply-partially #'string-match-p "\\^")
                                     (delq nil
                                           (mapcar
@@ -635,6 +667,27 @@ Returns a string with the formatted values separated by newlines."
                                  0 space-char t)))
    gh-repo-annotation-spec-alist " "))
 
+(defun gh-repo-get (resource &optional params &rest args)
+  "Retrieve a GitHub repository's data using specified RESOURCE and parameters.
+
+Argument RESOURCE: This is a required argument that specifies the RESOURCE to
+get from the GitHub repository.
+
+It should be a string.
+
+Optional argument PARAMS: This argument is optional and can be used to pass
+additional parameters to the `ghub-get' function.
+
+It should be a list.
+
+ARGS can be used to pass any number of additional arguments
+to the `ghub-get' function."
+  (let ((auth (gh-repo-authenticate)))
+    (apply #'ghub-get resource params
+           :auth (cdr auth)
+           :username (car auth)
+           args)))
+
 (defun gh-repo--ivy-read-repo (prompt url)
   "Read a repo in the minibuffer, with Ivy completion.
 
@@ -668,79 +721,77 @@ Argument URL is the url of a GitHub gist."
              (buff (current-buffer))
              (done)
              (output-buffer
-              (ghub-get url nil
-                        :query `((per_page . ,gh-repo-default-repos-limit))
-                        :auth (cdr gh-repo-ghub-auth-info)
-                        :username (car gh-repo-ghub-auth-info)
-                        :callback
-                        (lambda (value _headers _status req)
-                          (when (and (active-minibuffer-window)
-                                     (buffer-live-p buff)
-                                     (not done))
-                            (with-current-buffer buff
-                              (let ((names))
-                                (dolist (item value)
-                                  (let ((name (alist-get 'full_name item)))
-                                    (puthash name item response)
-                                    (push name names)))
-                                (setq cands (nreverse names))
-                                (setq maxlen (if cands
-                                                 (apply #'max
-                                                        (mapcar #'length
-                                                                cands))
-                                               30))
-                                (ivy-update-candidates
-                                 cands)))
-                            (let ((input ivy-text)
-                                  (pos
-                                   (when-let ((wind
-                                               (active-minibuffer-window)))
-                                     (with-selected-window
-                                         wind
-                                       (point)))))
-                              (when (active-minibuffer-window)
-                                (with-selected-window (active-minibuffer-window)
-                                  (delete-minibuffer-contents)))
-                              (progn
-                                (or
+              (gh-repo-get url nil
+                           :query `((per_page . ,gh-repo-default-repos-limit))
+                           :callback
+                           (lambda (value _headers _status req)
+                             (when (and (active-minibuffer-window)
+                                        (buffer-live-p buff)
+                                        (not done))
+                               (with-current-buffer buff
+                                 (let ((names))
+                                   (dolist (item value)
+                                     (let ((name (alist-get 'full_name item)))
+                                       (puthash name item response)
+                                       (push name names)))
+                                   (setq cands (nreverse names))
+                                   (setq maxlen (if cands
+                                                    (apply #'max
+                                                           (mapcar #'length
+                                                                   cands))
+                                                  30))
+                                   (ivy-update-candidates
+                                    cands)))
+                               (let ((input ivy-text)
+                                     (pos
+                                      (when-let ((wind
+                                                  (active-minibuffer-window)))
+                                        (with-selected-window
+                                            wind
+                                          (point)))))
+                                 (when (active-minibuffer-window)
+                                   (with-selected-window (active-minibuffer-window)
+                                     (delete-minibuffer-contents)))
                                  (progn
-                                   (and
-                                    (memq
-                                     (type-of ivy-last)
-                                     cl-struct-ivy-state-tags)
-                                    t))
-                                 (signal 'wrong-type-argument
-                                         (list 'ivy-state ivy-last)))
-                                (let* ((v ivy-last))
-                                  (aset v 2 ivy--all-candidates)))
-                              (when (fboundp 'ivy-state-preselect)
-                                (progn
-                                  (or
+                                   (or
+                                    (progn
+                                      (and
+                                       (memq
+                                        (type-of ivy-last)
+                                        cl-struct-ivy-state-tags)
+                                       t))
+                                    (signal 'wrong-type-argument
+                                            (list 'ivy-state ivy-last)))
+                                   (let* ((v ivy-last))
+                                     (aset v 2 ivy--all-candidates)))
+                                 (when (fboundp 'ivy-state-preselect)
                                    (progn
-                                     (and
-                                      (memq
-                                       (type-of ivy-last)
-                                       cl-struct-ivy-state-tags)
-                                      t))
-                                   (signal 'wrong-type-argument
-                                           (list 'ivy-state ivy-last)))
-                                  (let* ((v ivy-last))
-                                    (aset v 7 ivy--index))))
-                              (ivy--reset-state
-                               ivy-last)
-                              (when-let ((wind
-                                          (active-minibuffer-window)))
-                                (with-selected-window
-                                    wind
-                                  (insert input)
-                                  (goto-char
-                                   (when pos
-                                     (if (> pos
-                                            (point-max))
-                                         (point-max)
-                                       pos)))
-                                  (ivy--exhibit)))
-                              (ghub-continue req))))))
+                                     (or
+                                      (progn
+                                        (and
+                                         (memq
+                                          (type-of ivy-last)
+                                          cl-struct-ivy-state-tags)
+                                         t))
+                                      (signal 'wrong-type-argument
+                                              (list 'ivy-state ivy-last)))
+                                     (let* ((v ivy-last))
+                                       (aset v 7 ivy--index))))
+                                 (ivy--reset-state
+                                  ivy-last)
+                                 (when-let ((wind
+                                             (active-minibuffer-window)))
+                                   (with-selected-window
+                                       wind
+                                     (insert input)
+                                     (goto-char
+                                      (when pos
+                                        (if (> pos
+                                               (point-max))
+                                            (point-max)
+                                          pos)))
+                                     (ivy--exhibit)))
+                                 (ghub-continue req))))))
              (annotf (lambda (key)
                        (when (> (length key) maxlen)
                          (setq maxlen (1+ (length key))))
@@ -773,9 +824,8 @@ Argument URL is the url of a GitHub gist."
 (defun gh-repo-ivy-read-current-user-repo (&optional prompt)
   "Read a repo in the minibuffer with PROMPT and Ivy completion."
   (interactive)
-  (when (or (not (car gh-repo-ghub-auth-info))
-            (string-empty-p (car gh-repo-ghub-auth-info)))
-    (gh-repo-read-auth-marker))
+  (unless gh-repo--cached-auth-data
+    (gh-repo-authenticate))
   (gh-repo--ivy-read-repo (or prompt "Repo: ")
                           (concat "user/repos")))
 
@@ -783,9 +833,8 @@ Argument URL is the url of a GitHub gist."
 (defun gh-repo-ivy-read-other-user-repo (user)
   "Read a repo of USER in the minibuffer, with Ivy completion."
   (interactive (read-string "User: "))
-  (when (or (not (car gh-repo-ghub-auth-info))
-            (string-empty-p (car gh-repo-ghub-auth-info)))
-    (gh-repo-read-auth-marker))
+  (unless gh-repo--cached-auth-data
+    (gh-repo-authenticate))
   (gh-repo--ivy-read-repo "Repo: " (concat "users/"
                                            user
                                            "/repos")))
@@ -850,19 +899,21 @@ Argument URL is the url of a GitHub gist."
                              (lambda ()
                                (when (file-exists-p project-dir)
                                  (let ((default-directory project-dir))
-                                   (run-hooks 'gh-repo-after-create-repo-hook))))))
+                                   (run-hooks
+                                    'gh-repo-after-create-repo-hook))))))
     (message "Cannot clone %s" name)))
 
 (defun gh-repo-remove-request (fullname)
   "Remove a GitHub repository request.
 
 Remove a repository request with the given FULLNAME."
-  (ghub-delete (concat "/repos/" fullname) nil
-               :auth (cdr gh-repo-ghub-auth-info)
-               :username (car gh-repo-ghub-auth-info)
-               :callback
-               (lambda (_value &rest _)
-                 (message "Repository %s removed" fullname))))
+  (let ((auth (gh-repo-authenticate)))
+    (ghub-delete (concat "/repos/" fullname) nil
+                 :auth (cdr auth)
+                 :username (car auth)
+                 :callback
+                 (lambda (_value &rest _)
+                   (message "Repository %s removed" fullname)))))
 
 ;;;###autoload
 (defun gh-repo-delete (fullname)
@@ -1005,6 +1056,8 @@ interact with."
      (when (and (fboundp 'ivy-update-candidates))
        (lambda (items _input)
          (ivy-update-candidates items)
+         (execute-kbd-macro "a")
+         (call-interactively #'backward-delete-char-untabify)
          (run-hooks 'post-command-hook))))
     ('completing-read-default
      (lambda (_cands input)
@@ -1033,11 +1086,16 @@ interact with."
                     (when (fboundp 'icomplete-exhibit)
                       (icomplete-exhibit)))
                    (t (completion--flush-all-sorted-completions)
-                      (call-interactively 'minibuffer-complete))))))))))
+                      (execute-kbd-macro "a")
+                      (call-interactively #'backward-delete-char-untabify)
+                      (call-interactively #'minibuffer-complete))))))))))
 
 (defvar gh-repo-repos-hash (make-hash-table :test #'equal))
-(defvar gh-repo-repos-view-hash (make-hash-table :test #'equal))
 (defvar gh-repo-last-query nil)
+
+(defun gh-repo-hash-keys ()
+  "Extract keys from the `gh-repo-repos-hash' hash table."
+  (hash-table-keys gh-repo-repos-hash))
 
 (defun gh-repo-search-repos (&optional query)
   "Search and interactively select GitHub repositories using a QUERY.
@@ -1047,14 +1105,14 @@ Optional argument QUERY is a string that specifies the search QUERY."
   (unless (equal gh-repo-last-query query)
     (clrhash gh-repo-repos-hash))
   (setq gh-repo-last-query query)
-  (pcase completing-read-function
-    ('ivy-completing-read
-     (require 'ivy nil t)
-     (setq this-command 'gh-repo-search-repos)
-     (when (fboundp 'ivy-configure)
-       (when (fboundp 'ivy-recompute-index-zero)
-         (ivy-configure 'gh-repo-search-repos
-           :index-fn  #'ivy-recompute-index-zero)))))
+  ;; (pcase completing-read-function
+  ;;   ('ivy-completing-read
+  ;;    (require 'ivy nil t)
+  ;;    (setq this-command 'gh-repo-search-repos)
+  ;;    (when (fboundp 'ivy-configure)
+  ;;      (when (fboundp 'ivy-recompute-index-zero)
+  ;;        (ivy-configure 'gh-repo-search-repos
+  ;;          :index-fn  #'ivy-recompute-index-zero)))))
   (let* ((done)
          (update-fn
           (gh-repo-minibuffer-get-update-fn))
@@ -1076,11 +1134,13 @@ Optional argument QUERY is a string that specifies the search QUERY."
                      str)))
          (handler (lambda (text)
                     (unless done
+                      (message "searching...")
                       (gh-repo-search-repos-request
                        text
                        nil
                        query
                        (lambda (resp _headers _status req)
+                         (message nil)
                          (let ((items (alist-get 'items
                                                  resp))
                                (found))
@@ -1139,13 +1199,11 @@ Optional argument QUERY is a string that specifies the search QUERY."
            nil nil))
       (setq done t))))
 
+;;;###autoload
 (defun gh-repo-github-user ()
-  "Read a repo in the minibuffer, with Ivy completion.
-
-PROMPT is a string to prompt with; normally it ends in a colon and a space.
-
-Argument URL is the url of a GitHub gist."
+  "Retrieve and display GitHub users based on input in the minibuffer."
   (interactive)
+  (gh-repo-authenticate)
   (pcase completing-read-function
     ('ivy-completing-read
      (require 'ivy nil t)
@@ -1189,8 +1247,10 @@ Argument URL is the url of a GitHub gist."
                                         (setq logins
                                               (seq-uniq
                                                (delq nil
-                                                     (append logins
-                                                             (gh-repo-retrieve-logins new-logins)))))
+                                                     (append
+                                                      logins
+                                                      (gh-repo-retrieve-logins
+                                                       new-logins)))))
                                         (when update-fn
                                           (when (active-minibuffer-window)
                                             (with-selected-window
@@ -1222,24 +1282,18 @@ results are returned, with the search results passed as an argument."
                               (list str query))
                         "")))
     (if callback
-        (ghub-request "GET"
-                      (concat "search/users?q=" q
-                              (format "&per_page=100&page=%s" page))
-                      nil
-                      :auth (cdr gh-repo-ghub-auth-info)
-                      :username (car gh-repo-ghub-auth-info)
-                      :forge 'github
-                      :host "api.github.com"
-                      :callback (lambda (value &rest _)
-                                  (funcall callback value)))
-      (ghub-request "GET"
-                    (concat "search/users?q=" q
-                            (format "&per_page=100&page=%s" page))
-                    nil
-                    :auth (cdr gh-repo-ghub-auth-info)
-                    :username (car gh-repo-ghub-auth-info)
-                    :forge 'github
-                    :host "api.github.com"))))
+        (gh-repo-get
+         (concat "search/users?q=" q
+                 (format "&per_page=100&page=%s" page))
+         nil
+         :host "api.github.com"
+         :callback (lambda (value &rest _)
+                     (funcall callback value)))
+      (gh-repo-get
+       (concat "search/users?q=" q
+               (format "&per_page=100&page=%s" page))
+       nil
+       :host "api.github.com"))))
 
 (defun gh-repo-minibuffer-get-metadata ()
   "Return current minibuffer completion metadata."
@@ -1351,12 +1405,12 @@ Return the category metadatum as the type of the target."
 (defun gh-repo-browse-current-repo-and-exit ()
   "Browse the current GitHub repository and exit the minibuffer."
   (interactive)
-  (gh-repo-minibuffer-exit-with-action 'gh-repo-browse))
+  (gh-repo-minibuffer-exit-with-action #'gh-repo-browse))
 
 (defun gh-repo-browse-current-repo ()
   "Open the current repository without exiting minibuffer."
   (interactive)
-  (gh-repo-minibuffer-action-no-exit 'gh-repo-browse))
+  (gh-repo-minibuffer-action-no-exit #'gh-repo-browse))
 
 (defun gh-repo-get-minibuffer-input ()
   "Retrieve user input from the minibuffer in GitHub repository."
@@ -1372,6 +1426,7 @@ Return the category metadatum as the type of the target."
 
 
 
+;;;###autoload
 (defun gh-repo-search-internal-repos (repo &optional action)
   "Search for internal repositories and perform an optional ACTION.
 
@@ -1387,6 +1442,37 @@ ACTION to perform on the repository."
   (if (functionp action)
       (funcall action repo)
     (gh-repo-prompt-repo-action repo)))
+
+
+(defun gh-repo--read-auth-from-gh-config ()
+  "Extract and return GitHub username and OAuth token from gh config file."
+  (pcase-let* ((`(,username . ,file)
+                (with-temp-buffer
+                  (when (zerop
+                         (call-process
+                          "gh" nil t
+                          nil "auth" "status"))
+                    (re-search-backward
+                     "Logged in to github.com as \\([a-zA-Z0-9-]*[a-zA-Z0-9]\\{1\\}\\)[\s\t\n]+[(]\\([^)]+\\)[)]"
+                     nil t 1)
+                    (cons (match-string-no-properties 1)
+                          (match-string-no-properties 2)))))
+               (token (and username file
+                           (file-exists-p file)
+                           (with-temp-buffer
+                             (insert-file-contents file)
+                             (when (re-search-forward
+                                    "github\\.com:[\s\n]+oauth_token:[\s]+\\([^\n]+\\)"
+                                    nil t 1)
+                               (match-string-no-properties
+                                1))))))
+    (and token (cons username token))))
+
+(defun gh-repo-auth-from-gh-config ()
+  "Extract OAuth token from either `gh-repo--cached-auth-data' or gh config."
+  (or gh-repo--cached-auth-data
+      (setq gh-repo--cached-auth-data
+            (gh-repo--read-auth-from-gh-config))))
 
 (defun gh-repo-search-repos-request (code page &optional search-query callback)
   "Send an asynchronous request to GitHub's CODE search API.
@@ -1407,23 +1493,17 @@ results are returned, with the search results passed as an argument."
                               (per_page . 100)
                               (page . ,page)))))
     (if callback
-        (ghub-request "GET"
-                      "/search/repositories"
-                      nil
-                      :query query
-                      :auth (cdr gh-repo-ghub-auth-info)
-                      :username (car gh-repo-ghub-auth-info)
-                      :forge 'github
-                      :host "api.github.com"
-                      :callback callback)
-      (ghub-request "GET"
-                    (concat "search/repositories?q=" q
-                            (format "&per_page=100&page=%s" (or page 1)))
-                    nil
-                    :auth (cdr gh-repo-ghub-auth-info)
-                    :username (car gh-repo-ghub-auth-info)
-                    :forge 'github
-                    :host "api.github.com"))))
+        (gh-repo-get
+         "/search/repositories"
+         nil
+         :query query
+         :host "api.github.com"
+         :callback callback)
+      (gh-repo-get
+       (concat "search/repositories?q=" q
+               (format "&per_page=100&page=%s" (or page 1)))
+       nil
+       :host "api.github.com"))))
 
 ;;;###autoload
 (defun gh-repo-clone-other-user-repo (name)
@@ -1456,23 +1536,16 @@ results are returned, with the search results passed as an argument."
            (setq value (string-join value "="))
            (cons key value)))
         (t (cons (substring-no-properties arg (length "--")) t))))
-(defun gh-repo-auth-from-gh-cli ()
-  "Extract GitHub username from GitHub CLI authentication status."
-  (with-temp-buffer
-    (when (zerop (call-process "gh" nil t nil "auth" "status"))
-      (when (re-search-backward
-             "Logged in to github.com as \\([a-z][^\s\t\n]+\\)" nil t 1)
-        (match-string-no-properties 1)))))
+
 
 
 (defun gh-repo-post-request (payload)
   "Send a POST request with PAYLOAD to create a repository on GitHub."
-  (require 'ghub)
-  (when (fboundp 'ghub-post)
+  (let ((auth (gh-repo-authenticate)))
     (ghub-post "/user/repos" nil
                :payload payload
-               :auth (cdr gh-repo-ghub-auth-info)
-               :username (car gh-repo-ghub-auth-info)
+               :auth (cdr auth)
+               :username (car auth)
                :callback
                (lambda (value &rest _)
                  (if
@@ -1556,7 +1629,9 @@ candidates."
     :class transient-option
     :choices (lambda (&rest _)
                (unless gh-repo-gitignore-templates
-                 (setq gh-repo-gitignore-templates (append (gh-repo-load-gitignore-templates) nil)))
+                 (setq gh-repo-gitignore-templates
+                       (append
+                        (gh-repo-load-gitignore-templates) nil)))
                gh-repo-gitignore-templates))
    ("t" "template repository" "--is_template")
    ("i" "has_issues" "--has_issues")
@@ -1569,15 +1644,16 @@ candidates."
     :description (lambda ()
                    (concat  "Github User: "
                             (if
-                                (or (not (car gh-repo-ghub-auth-info))
+                                (or (not (car-safe gh-repo--cached-auth-data))
                                     (string-empty-p (car
-                                                     gh-repo-ghub-auth-info))
-                                    (not (cdr gh-repo-ghub-auth-info)))
+                                                     gh-repo--cached-auth-data))
+                                    (not (cdr-safe gh-repo--cached-auth-data)))
                                 "(not logged)"
                               (propertize
                                (substring-no-properties
-                                (car
-                                 gh-repo-ghub-auth-info))
+                                (or (car-safe
+                                     gh-repo--cached-auth-data)
+                                    ""))
                                'face 'transient-value)))))]
   ["Search query"
    ("l" "language" "--language="
