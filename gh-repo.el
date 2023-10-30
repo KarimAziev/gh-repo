@@ -35,11 +35,31 @@
 (eval-when-compile
   (require 'subr-x))
 (require 'ghub)
+
 (require 'shell)
 (require 'comint)
 (require 'request)
 (require 'auth-source)
 (require 'transient)
+
+(defvar ivy-last)
+(defvar ivy-regex)
+(defvar ivy--old-cands)
+(defvar ivy-index-functions-alist)
+(defvar ivy--all-candidates)
+(defvar ivy--index)
+(declare-function ivy--insert-minibuffer "ivy")
+(declare-function ivy--exhibit "ivy")
+(declare-function ivy-state-preselect "ivy")
+(declare-function ivy--preselect-index "ivy")
+(declare-function ivy--recompute-index "ivy")
+(declare-function ivy-set-index "ivy")
+(declare-function ivy-alist-setting "ivy")
+(declare-function ivy-re-to-str "ivy")
+(declare-function ivy--sort-maybe "ivy")
+(declare-function ivy--set-candidates "ivy")
+(declare-function ivy-state-current "ivy")
+
 
 (defcustom gh-repo-excluded-dirs '("~/Dropbox"
                                    "~/melpa"
@@ -92,6 +112,8 @@ Default value is to use xwidgets if available, othervise `browse-url'."
                  (function-item browse-url)
                  (function :tag "Custom function"))
   :group 'gh-repo)
+
+
 
 (defcustom gh-repo-actions '((?c "clone" gh-repo-clone-repo)
                              (?b "browse" gh-repo-browse)
@@ -667,6 +689,21 @@ Returns a string with the formatted values separated by newlines."
                                  0 space-char t)))
    gh-repo-annotation-spec-alist " "))
 
+(defun gh-repo-plist-omit (keys plist)
+  "Remove KEYS and values from PLIST."
+  (let* ((result (list 'head))
+         (last result))
+    (while plist
+      (let* ((key (pop plist))
+             (val (pop plist))
+             (new (and (not (memq key keys))
+                       (list key val))))
+        (when new
+          (setcdr last new)
+          (setq last (cdr new)))))
+    (cdr result)))
+
+
 (defun gh-repo-get (resource &optional params &rest args)
   "Retrieve a GitHub repository's data using specified RESOURCE and parameters.
 
@@ -682,11 +719,26 @@ It should be a list.
 
 ARGS can be used to pass any number of additional arguments
 to the `ghub-get' function."
-  (let ((auth (gh-repo-authenticate)))
-    (apply #'ghub-get resource params
+  (let* ((auth (gh-repo-authenticate))
+         (query (plist-get args :query))
+         (query-str (mapconcat
+                     (pcase-lambda (`(,k . ,v))
+                       (format "%s=%s" k v))
+                     (seq-filter #'cdr query)
+                     "&"))
+         (url
+          (if (string-empty-p query-str)
+              resource
+            (concat (if (string-suffix-p "/" resource)
+                        (substring-no-properties resource (1- (length
+                                                               resource)))
+                      resource)
+                    "?" query-str))))
+    (apply #'ghub-get url params
            :auth (cdr auth)
            :username (car auth)
-           args)))
+           (gh-repo-plist-omit '(:query)
+                               args))))
 
 (defun gh-repo--ivy-read-repo (prompt url)
   "Read a repo in the minibuffer, with Ivy completion.
@@ -934,17 +986,17 @@ Remove a repository request with the given FULLNAME."
              (concat "https://github.com/" repo))))
 
 
+
 (defun gh-repo-prompt-repo-action (repo)
   "Prompt for an action to perform on a given repository.
 
 Argument REPO is a variable that represents the repository for which an action
 is to be prompted."
-  (let ((choice (and (read-multiple-choice
-                      (format "Action for %s" repo)
-                      gh-repo-actions))))
-    (if (and (nth 2 choice)
-             (functionp (nth 2 choice)))
-        (funcall (nth 2 choice) repo)
+  (let ((choice (read-multiple-choice
+                 (format "Action for %s" repo)
+                 gh-repo-actions)))
+    (if (functionp (caddr choice))
+        (funcall (caddr choice) repo)
       choice)))
 
 ;;;###autoload
@@ -1045,6 +1097,35 @@ interact with."
                                           "https://api.github.com/repos/%s/git/trees/%s"
                                           repo "HEAD")
                                          "/")))))))))
+
+(defun gh-repo-update-ivy-cands (items)
+  "Update the list of candidates in Ivy's completion buffer.
+
+Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
+  (let ((cur (ivy-state-current ivy-last)))
+    (ivy--set-candidates
+     (ivy--sort-maybe
+      items))
+    (let ((re (ivy-re-to-str ivy-regex)))
+      (if ivy--old-cands
+          (if (eq (ivy-alist-setting ivy-index-functions-alist)
+                  'ivy-recompute-index-zero)
+              (ivy-set-index 0)
+            (ivy--recompute-index re ivy--all-candidates))
+        (unless (string= cur (nth ivy--index ivy--all-candidates))
+          (let ((func (ivy-alist-setting ivy-index-functions-alist)))
+            (if func
+                (funcall func re ivy--all-candidates)
+              (ivy--preselect-index
+               (if (> (length re) 0)
+                   cur
+                 (ivy-state-preselect ivy-last))
+               ivy--all-candidates))))))
+    (setq ivy--old-cands ivy--all-candidates)
+    (if ivy--all-candidates
+        (ivy--exhibit)
+      (ivy--insert-minibuffer ""))))
+
 (defun gh-repo-minibuffer-get-update-fn ()
   "Update the minibuffer's completion candidates based on the current mode."
   (pcase completing-read-function
@@ -1055,40 +1136,16 @@ interact with."
     ('ivy-completing-read
      (when (and (fboundp 'ivy-update-candidates))
        (lambda (items _input)
-         (ivy-update-candidates items)
-         (execute-kbd-macro "a")
-         (call-interactively #'backward-delete-char-untabify)
-         (run-hooks 'post-command-hook))))
+         (gh-repo-update-ivy-cands items))))
+    ((guard (bound-and-true-p icomplete-mode))
+     (lambda (&rest _)
+       (completion--flush-all-sorted-completions)
+       (when (fboundp 'icomplete-exhibit)
+         (icomplete-exhibit))))
     ('completing-read-default
-     (lambda (_cands input)
-       (let ((pos
-              (when-let ((wind
-                          (active-minibuffer-window)))
-                (with-selected-window
-                    wind
-                  (point)))))
-         (when (active-minibuffer-window)
-           (with-selected-window
-               (active-minibuffer-window)
-             (delete-minibuffer-contents)))
-         (when-let ((wind
-                     (active-minibuffer-window)))
-           (with-selected-window
-               wind
-             (insert input)
-             (goto-char
-              (when pos
-                (if (> pos
-                       (point-max))
-                    (point-max)
-                  pos)))
-             (cond ((bound-and-true-p icomplete-mode)
-                    (when (fboundp 'icomplete-exhibit)
-                      (icomplete-exhibit)))
-                   (t (completion--flush-all-sorted-completions)
-                      (execute-kbd-macro "a")
-                      (call-interactively #'backward-delete-char-untabify)
-                      (call-interactively #'minibuffer-complete))))))))))
+     (lambda (&rest _)
+       (completion--flush-all-sorted-completions)
+       (minibuffer-completion-help)))))
 
 (defvar gh-repo-repos-hash (make-hash-table :test #'equal))
 (defvar gh-repo-last-query nil)
@@ -1097,27 +1154,23 @@ interact with."
   "Extract keys from the `gh-repo-repos-hash' hash table."
   (hash-table-keys gh-repo-repos-hash))
 
+
+
 (defun gh-repo-search-repos (&optional query)
   "Search and interactively select GitHub repositories using a QUERY.
 
 Optional argument QUERY is a string that specifies the search QUERY."
   (interactive (list (gh-repo-get-search-query)))
-  (unless (equal gh-repo-last-query query)
-    (clrhash gh-repo-repos-hash))
+  ;; (unless (equal gh-repo-last-query query)
+  ;;   (clrhash gh-repo-repos-hash))
+  (clrhash gh-repo-repos-hash)
   (setq gh-repo-last-query query)
-  ;; (pcase completing-read-function
-  ;;   ('ivy-completing-read
-  ;;    (require 'ivy nil t)
-  ;;    (setq this-command 'gh-repo-search-repos)
-  ;;    (when (fboundp 'ivy-configure)
-  ;;      (when (fboundp 'ivy-recompute-index-zero)
-  ;;        (ivy-configure 'gh-repo-search-repos
-  ;;          :index-fn  #'ivy-recompute-index-zero)))))
+  (setq this-command 'gh-repo-search-repos)
   (let* ((done)
          (update-fn
           (gh-repo-minibuffer-get-update-fn))
          (maxlen
-          (if-let ((keys (hash-table-keys gh-repo-repos-hash)))
+          (if-let ((keys (gh-repo-hash-keys)))
               (apply #'max (mapcar #'length keys))
             80))
          (annotf (lambda (key)
@@ -1139,34 +1192,19 @@ Optional argument QUERY is a string that specifies the search QUERY."
                        text
                        nil
                        query
-                       (lambda (resp _headers _status req)
+                       (lambda (resp _headers _status _req)
                          (message nil)
-                         (let ((items (alist-get 'items
-                                                 resp))
-                               (found))
+                         (let ((items (alist-get 'items resp))
+                               (str (gh-repo-get-minibuffer-input))
+                               (miniwind (active-minibuffer-window)))
                            (dolist (item items)
                              (let ((name
                                     (alist-get 'full_name item)))
-                               (unless (gethash (alist-get 'full_name item)
-                                                gh-repo-repos-hash)
-                                 (setq found t)
-                                 (puthash name item gh-repo-repos-hash))))
-                           (when (and found
-                                      text items)
-                             (let ((str
-                                    (gh-repo-get-minibuffer-input))
-                                   (miniwind
-                                    (active-minibuffer-window)))
-                               (when (and miniwind
-                                          (equal text str))
-                                 (with-selected-window
-                                     miniwind
-                                   (funcall update-fn
-                                            (mapcar #'substring-no-properties
-                                                    (hash-table-keys
-                                                     gh-repo-repos-hash))
-                                            text))
-                                 (ghub-continue req))))))))))
+                               (puthash name item gh-repo-repos-hash)))
+                           (when (and miniwind items text str (equal text str))
+                             (with-selected-window
+                                 miniwind
+                               (funcall update-fn (gh-repo-hash-keys) text)))))))))
          (hook-fn (lambda (&rest _)
                     (let ((text
                            (gh-repo-get-minibuffer-input)))
@@ -1182,19 +1220,14 @@ Optional argument QUERY is a string that specifies the search QUERY."
               (when (minibufferp)
                 (use-local-map (make-composed-keymap gh-repo-minibuffer-map
                                                      (current-local-map)))
-                (add-hook 'post-self-insert-hook
-                          hook-fn
-                          nil
-                          t)))
+                (add-hook 'post-self-insert-hook hook-fn nil t)))
           (completing-read
            "Repo: "
            (lambda (str pred action)
              (if (eq action 'metadata)
                  `(metadata
                    (annotation-function . ,annotf))
-               (complete-with-action action (mapcar #'substring-no-properties
-                                                    (hash-table-keys
-                                                     gh-repo-repos-hash))
+               (complete-with-action action (gh-repo-hash-keys)
                                      str pred)))
            nil nil))
       (setq done t))))
@@ -1265,7 +1298,6 @@ Optional argument QUERY is a string that specifies the search QUERY."
               logins))
            nil nil))
       (setq done t))))
-
 
 (defun gh-repo-search-users (str page query &optional callback)
   "Send an asynchronous request to GitHub's CODE search API.
@@ -1490,7 +1522,7 @@ results are returned, with the search results passed as an argument."
                          ""))
          (query (seq-filter #'cdr
                             `((q . ,q)
-                              (per_page . 100)
+                              ;; (per_page . 100)
                               (page . ,page)))))
     (if callback
         (gh-repo-get
@@ -1570,7 +1602,7 @@ results are returned, with the search results passed as an argument."
 
 
 (defun gh-repo-get-search-query ()
-  "Search from transient."
+  "Generate a search query string from the current transient command arguments."
   (let ((args (transient-args transient-current-command)))
     (seq-reduce
      (lambda (acc arg)
