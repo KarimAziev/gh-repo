@@ -36,6 +36,7 @@
   (require 'subr-x))
 (require 'ghub)
 
+
 (require 'shell)
 (require 'comint)
 (require 'request)
@@ -69,10 +70,31 @@
   :group 'gh-repo
   :type '(repeat directory))
 
+(defcustom gh-repo-excluded-dirs-regex '("\\`\\.")
+  "Regular expression list to exclude directories from GitHub repository searches.
+
+A regular expression list to exclude certain directories when searching for Git
+repositories. The default value excludes directories starting with a dot, which
+typically denotes hidden directories in Unix-like systems.
+
+Each element in the list should be a string representing a regular expression.
+Directories matching any of these regular expressions will be ignored during the
+search for Git repositories. This can be useful for excluding vendor
+directories, build output, or other areas of a file system that should not be
+considered part of a project's source code.
+
+To modify this list, use the customization interface or set the value in your
+Emacs configuration file using `setq'. Ensure that each regular expression is
+properly escaped to match the intended directory patterns."
+  :group 'gh-repo
+  :type '(repeat directory))
+
 (defcustom gh-repo-default-license "gpl-3.0"
   "Default repository license."
   :type 'string
   :group 'gh-repo)
+
+
 
 (defcustom gh-repo-ghub-auth-info '("" . gh-repo)
   "String of USERNAME^MARKER in auth sources."
@@ -272,7 +294,9 @@ at the values with which this function was called."
                    `(apply ,fn (append pre-args (list ,@args))))))))
 
 (defmacro gh-repo-util--compose (&rest functions)
-  "Return right-to-left composition from FUNCTIONS."
+  "Compose FUNCTIONS in reverse order from FUNCTIONS.
+
+Remaining arguments FUNCTIONS are the functions to be composed."
   (declare (debug t)
            (pure t)
            (side-effect-free t))
@@ -309,21 +333,38 @@ If the result of PRED is nil, return the argument as is."
             (setq arg res)))
         arg))))
 
-(defun gh-repo-util-alist-ssh-hosts ()
-  "Return hosts found in .ssh/config."
-  (when (file-exists-p "~/.ssh/config")
-    (with-temp-buffer
-      (insert-file-contents
-       "~/.ssh/config")
-      (let ((alist))
-        (while (re-search-forward
-                "\\(HOST[\s\t]\\([^\n]+\\)[\n\s\t]+HOSTNAME[\s\t\n]\\([^\s\t\n]+\\)\\)"
-                nil t 1)
-          (let ((host (match-string-no-properties 2))
-                (hostname (match-string-no-properties 3)))
-            (push (cons host hostname)
-                  alist)))
-        alist))))
+(defun gh-repo-util-alist-ssh-hosts (file)
+  "Extract SSH hosts and properties from FILE.
+
+Argument FILE is the name of the file to read SSH host configurations from."
+  (when (file-exists-p file)
+    (let ((result)
+          (curr))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (while
+            (pcase-let
+                ((`(,prop ,value)
+                  (split-string (buffer-substring-no-properties
+                                 (point)
+                                 (line-end-position))
+                                nil
+                                t)))
+              (pcase prop
+                ("Host"
+                 (when curr
+                   (push curr result))
+                 (setq curr (cons value (list (cons prop value)))))
+                ("#")
+                ((pred (stringp))
+                 (when curr
+                   (let ((cell (cdr curr)))
+                     (setcdr curr (append cell
+                                          (list (cons prop value))))))))
+              (zerop (forward-line 1))))
+        (when curr
+          (push curr result)))
+      result)))
 
 (defun gh-repo-util-normalize-url-filename (filename)
   "Transform FILENAME to git filename."
@@ -374,7 +415,10 @@ With optional argument SSH-HOST also replace host."
 
 (defun gh-repo-util-get-ssh-variants (ssh-url)
   "Return variants of git ssh for SSH-URL."
-  (let* ((local-alist (gh-repo-util-alist-ssh-hosts))
+  (let* ((ssh-config (gh-repo-util-alist-ssh-hosts "~/.ssh/config"))
+         (local-alist (mapcar (pcase-lambda (`(,k . ,v))
+                                (cons k (cdr (assoc-string "HostName" v))))
+                              ssh-config))
          (cell (with-temp-buffer
                  (save-excursion
                    (insert (replace-regexp-in-string "^git@" ""
@@ -400,63 +444,106 @@ With optional argument SSH-HOST also replace host."
                         (cdr cell)))
               local-alist)))))
 
+(defun gh-repo--expand-pattern (curr pattern)
+  "Recoursively expand PATTERN for string CURR.
+PATTERN can be either string or function, or list of strings and functions."
+  (pcase pattern
+    ((pred functionp)
+     (funcall pattern curr))
+    ((pred stringp)
+     (string-match-p pattern curr))
+    (_ (seq-find
+        (apply-partially #'gh-repo--expand-pattern curr)
+        pattern))))
 
-(defun gh-repo-project-expand-wildcards (pattern dir depth &optional full)
-  "Return list of files that matches PATTERN in DIR at max DEPTH.
-If FULL is non-nil, files are absolute."
-  (let ((tramp-archive-enabled nil))
-    (let ((dir (file-name-as-directory dir)))
-      (mapcan (lambda (n)
-                (let ((tramp-archive-enabled nil))
-                  (file-expand-wildcards
-                   (concat dir
-                           (string-join
-                            (append (make-vector n "**")
-                                    (list pattern))
-                            "/"))
-                   full)))
-              (number-sequence 0 (1- depth))))))
+(defun gh-repo--find-in-dir (dir &optional pattern non-visit-pattern max-depth
+                               transform-fn current-depth)
+  "Return list of files that matches PATTERN in DIR at MAX-DEPTH.
 
-(defun gh-repo-project-get-projects (&optional depth dir)
-  "Return all git repositories at DEPTH in DIR.
-Default value for DEPTH is 3.
-Default value for DIR is home directory."
-  (unless depth (setq depth 3))
-  (unless dir (setq dir "~/"))
-  (let ((projects)
-        (excluded (delq nil (append
-                             gh-repo-excluded-dirs
-                             (when
-                                 (require 'xdg nil t)
-                               (mapcar (lambda (it)
-                                         (when (fboundp it)
-                                           (funcall it)))
-                                       '(xdg-state-home
-                                         xdg-data-home))))))
-        (file-name-handler-alist nil))
-    (dolist (dir (directory-files dir t directory-files-no-dot-files-regexp))
-      (when (and (file-directory-p dir)
-                 (file-accessible-directory-p dir)
-                 (not (or (seq-find (apply-partially #'file-equal-p dir)
-                                    excluded)
-                          (seq-find (apply-partially #'file-in-directory-p dir)
-                                    excluded))))
-        (setq projects
-              (if (file-exists-p (concat dir "/.git"))
-                  (push (concat dir "/.git") projects)
-                (nconc (gh-repo-project-expand-wildcards "\\*/.git" dir
-                                                         (1- depth))
-                       projects)))))
-    (mapcar (lambda (dir)
-              (abbreviate-file-name (file-name-parent-directory dir)))
-            projects)))
+Both PATTERN and NON-VISIT-PATTERN, if non nil,
+will be tested against the directory to visit.
 
+It should be either:
+- string that will be tested against the current file name of the directory.
+- function (will be called with one argument local directory name)
+- list of patterns, that will be tested until first non nil result.
+
+If PATTERN matches, it will be added to result, and not be visited.
+
+If NON-VISIT-PATTERN matches, directory will not be visited.
+
+If TRANSFORM-FN is non nil, it should be a function that will be called with one
+argument - full directory name.
+
+CURRENT-DEPTH is used for recoursive purposes."
+  (setq current-depth (1+ (or current-depth 0)))
+  (unless max-depth (setq max-depth 1))
+  (when (>= max-depth current-depth)
+    (let ((non-essential t))
+      (let ((found-dirs))
+        (let
+            ((default-directory (expand-file-name (file-name-as-directory dir))))
+          (dolist
+              (curr
+               (directory-files default-directory nil
+                                directory-files-no-dot-files-regexp t))
+            (let ((full-dir (expand-file-name curr))
+                  (tramp-archive-enabled nil))
+              (cond ((not (file-directory-p full-dir)))
+                    ((and non-visit-pattern
+                          (gh-repo--expand-pattern curr non-visit-pattern)))
+                    ((and pattern
+                          (gh-repo--expand-pattern curr pattern))
+                     (setq found-dirs
+                           (push (if transform-fn
+                                     (funcall transform-fn full-dir)
+                                   full-dir)
+                                 found-dirs)))
+                    (t
+                     (unless pattern
+                       (setq found-dirs
+                             (push (if transform-fn
+                                       (funcall transform-fn full-dir)
+                                     full-dir)
+                                   found-dirs)))
+                     (when-let ((subdirs (gh-repo--find-in-dir full-dir
+                                                             pattern
+                                                             non-visit-pattern
+                                                             max-depth
+                                                             transform-fn
+                                                             current-depth)))
+                       (setq found-dirs
+                             (if found-dirs
+                                 (nconc
+                                  found-dirs
+                                  subdirs)
+                               subdirs))))))))
+        found-dirs))))
+
+
+(require 'project)
 (defun gh-repo-find-clone-directories ()
   "Return list of git parents directories."
-  (append (delete-dups (mapcar #'file-name-parent-directory
-                               (gh-repo-project-get-projects 3)))
-          (when (fboundp 'straight--repos-dir)
-            (list (straight--repos-dir)))))
+  (let ((parents (delq nil
+                       (when (fboundp 'straight--repos-dir)
+                         (list (straight--repos-dir))))))
+    (gh-repo--find-in-dir "~/" #'project--find-in-directory
+                                (append
+                                 (list vc-ignore-dir-regexp)
+                                 gh-repo-excluded-dirs-regex
+                                 (mapcar (apply-partially #'format "\\`%s\\'")
+                                         vc-directory-exclusion-list)
+                                 (mapcar (apply-partially #'apply-partially
+                                                          'file-equal-p)
+                                         gh-repo-excluded-dirs))
+                                3
+                                (lambda (proj)
+                                  (let ((parent
+                                         (file-name-parent-directory proj)))
+                                    (unless (member parent parents)
+                                      (push parent parents))
+                                    parent)))
+    parents))
 
 
 (defun gh-repo--browse-with-xwidget (url)
@@ -485,9 +572,15 @@ Default value for DIR is home directory."
   "List of hooks to run after cloning new repository.")
 
 (defun gh-repo-exec-in-dir (command project-dir &optional callback)
-  "Execute COMMAND in PROJECT-DIR.
-If PROJECT-DIR doesn't exists, create new.
-Invoke CALLBACK without args."
+  "Execute COMMAND in PROJECT-DIR, optionally running CALLBACK on completion.
+
+Argument COMMAND is a string representing the shell command to execute.
+
+Argument PROJECT-DIR is a string specifying the directory in which to execute
+COMMAND.
+
+Optional argument CALLBACK is a function to call when COMMAND execution finishes
+successfully."
   (let ((proc)
         (buffer (generate-new-buffer (format "*%s*" command))))
     (progn (switch-to-buffer buffer)
@@ -601,7 +694,7 @@ The default value is nil."
 
 
 (defun gh-repo-read-auth-marker ()
-  "Search for gh token in `auth-sources'."
+  "Retrieve and optionally save GitHub auth info."
   (when-let ((variants
               (seq-uniq
                (auth-source-search
@@ -655,7 +748,7 @@ The default value is nil."
              (error "Request failed"))))))
 
 (defun gh-repo-load-gitignore-templates ()
-  "Return list of available licences from github api."
+  "Fetch list of .gitignore templates from GitHub API."
   (let ((response (request "https://api.github.com/gitignore/templates"
                     :type "GET"
                     :headers
@@ -1104,14 +1197,10 @@ interact with."
 Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
   (let ((cur (ivy-state-current ivy-last)))
     (ivy--set-candidates
-     (ivy--sort-maybe
-      items))
+     items)
     (let ((re (ivy-re-to-str ivy-regex)))
       (if ivy--old-cands
-          (if (eq (ivy-alist-setting ivy-index-functions-alist)
-                  'ivy-recompute-index-zero)
-              (ivy-set-index 0)
-            (ivy--recompute-index re ivy--all-candidates))
+          (ivy--recompute-index re ivy--all-candidates)
         (unless (string= cur (nth ivy--index ivy--all-candidates))
           (let ((func (ivy-alist-setting ivy-index-functions-alist)))
             (if func
@@ -1161,50 +1250,83 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
 
 Optional argument QUERY is a string that specifies the search QUERY."
   (interactive (list (gh-repo-get-search-query)))
-  ;; (unless (equal gh-repo-last-query query)
-  ;;   (clrhash gh-repo-repos-hash))
-  (clrhash gh-repo-repos-hash)
   (setq gh-repo-last-query query)
   (setq this-command 'gh-repo-search-repos)
-  (let* ((done)
+  (gh-repo-async-comp-read "Repo: " "/search/repositories"
+                           'gh-repo-search-repos
+                           query
+                           'full_name
+                           'gh-repo-values-to-columns))
+
+
+(defun gh-repo-async-comp-read (prompt url caller query hash-key &optional
+                                       annotate-fn)
+  "Fetch GitHub repo data with minibuffer completion.
+
+Argument PROMPT is a string displayed as the prompt in the minibuffer.
+
+Argument URL is a string representing the endpoint to which the HTTP request is
+made.
+
+Argument CALLER is a symbol representing the command that invoked the
+completion.
+
+Argument QUERY is a plist containing additional parameters for the HTTP request.
+
+Argument HASH-KEY is a symbol or string used to extract the relevant value from
+the JSON response.
+
+Optional argument ANNOTATE-FN is a function that takes an item and returns an
+annotation string."
+  (gh-repo-authenticate)
+  (when caller
+    (setq this-command caller))
+  (let* ((hash (make-hash-table :test #'equal))
+         (done)
          (update-fn
           (gh-repo-minibuffer-get-update-fn))
-         (maxlen
-          (if-let ((keys (gh-repo-hash-keys)))
-              (apply #'max (mapcar #'length keys))
-            80))
-         (annotf (lambda (key)
-                   (when (> (length key) maxlen)
-                     (setq maxlen (1+ (length key))))
-                   (let* ((data (gethash key gh-repo-repos-hash))
-                          (annot-str (gh-repo-values-to-columns
-                                      data))
-                          (str (concat
-                                (propertize " " 'display
-                                            `(space :align-to
-                                                    ,maxlen))
-                                annot-str)))
-                     str)))
-         (handler (lambda (text)
-                    (unless done
-                      (message "searching...")
-                      (gh-repo-search-repos-request
-                       text
-                       nil
-                       query
-                       (lambda (resp _headers _status _req)
-                         (message nil)
-                         (let ((items (alist-get 'items resp))
-                               (str (gh-repo-get-minibuffer-input))
-                               (miniwind (active-minibuffer-window)))
-                           (dolist (item items)
-                             (let ((name
-                                    (alist-get 'full_name item)))
-                               (puthash name item gh-repo-repos-hash)))
-                           (when (and miniwind items text str (equal text str))
-                             (with-selected-window
-                                 miniwind
-                               (funcall update-fn (gh-repo-hash-keys) text)))))))))
+         (maxlen 90)
+         (annotf
+          (when annotate-fn
+            (lambda (key)
+              (when (> (length key) maxlen)
+                (setq maxlen (1+ (length key))))
+              (let* ((data (gethash key hash))
+                     (annot-str (funcall annotate-fn data))
+                     (str (concat
+                           (propertize " " 'display
+                                       `(space :align-to
+                                               ,maxlen))
+                           annot-str)))
+                str))))
+         (handler
+          (lambda (text)
+            (unless done
+              (message "searching... %s" text)
+              (gh-repo-get
+               url
+               nil
+               :query (gh-repo-make-query text
+                                          query
+                                          nil
+                                          100)
+               :host "api.github.com"
+               :callback
+               (lambda (resp _headers _status _req)
+                 (message nil)
+                 (let ((items (alist-get 'items resp))
+                       (str (gh-repo-get-minibuffer-input))
+                       (miniwind (active-minibuffer-window))
+                       (keys))
+                   (dolist (item items)
+                     (let ((name
+                            (alist-get hash-key item)))
+                       (push name keys)
+                       (puthash name item hash)))
+                   (when (and miniwind items text str (equal text str))
+                     (with-selected-window
+                         miniwind
+                       (funcall update-fn keys text)))))))))
          (hook-fn (lambda (&rest _)
                     (let ((text
                            (gh-repo-get-minibuffer-input)))
@@ -1220,84 +1342,29 @@ Optional argument QUERY is a string that specifies the search QUERY."
               (when (minibufferp)
                 (use-local-map (make-composed-keymap gh-repo-minibuffer-map
                                                      (current-local-map)))
-                (add-hook 'post-self-insert-hook hook-fn nil t)))
+                (add-hook 'after-change-functions hook-fn nil t)))
           (completing-read
-           "Repo: "
+           prompt
            (lambda (str pred action)
-             (if (eq action 'metadata)
+             (if (and annotf
+                      (eq action 'metadata))
                  `(metadata
                    (annotation-function . ,annotf))
-               (complete-with-action action (gh-repo-hash-keys)
+               (complete-with-action action (hash-table-keys hash)
                                      str pred)))
            nil nil))
       (setq done t))))
+
 
 ;;;###autoload
 (defun gh-repo-github-user ()
   "Retrieve and display GitHub users based on input in the minibuffer."
   (interactive)
   (gh-repo-authenticate)
-  (pcase completing-read-function
-    ('ivy-completing-read
-     (require 'ivy nil t)
-     (setq this-command 'gh-repo-github-user)
-     (when (fboundp 'ivy-configure)
-       (when (fboundp 'ivy-recompute-index-swiper-async)
-         (ivy-configure 'gh-repo-github-user
-           :index-fn #'ivy-recompute-index-swiper-async)))))
-  (let* ((logins)
-         (done)
-         (hist)
-         (update-fn
-          (gh-repo-minibuffer-get-update-fn)))
-    (unwind-protect
-        (minibuffer-with-setup-hook
-            (lambda ()
-              (when (minibufferp)
-                (add-hook 'after-change-functions
-                          (lambda (&rest _)
-                            (let ((text
-                                   (save-excursion
-                                     (goto-char (point-min))
-                                     (buffer-substring-no-properties
-                                      (minibuffer-prompt-end)
-                                      (line-end-position)))))
-                              (unless (or (string-empty-p text)
-                                          (member text logins)
-                                          (member text hist))
-                                (gh-repo-debounce
-                                 'gh-repo-minibuffer-timer
-                                 0.5
-                                 (lambda ()
-                                   (push text hist)
-                                   (gh-repo-search-users
-                                    text
-                                    1
-                                    nil
-                                    (lambda (new-logins)
-                                      (run-hooks 'post-command-hook)
-                                      (unless done
-                                        (setq logins
-                                              (seq-uniq
-                                               (delq nil
-                                                     (append
-                                                      logins
-                                                      (gh-repo-retrieve-logins
-                                                       new-logins)))))
-                                        (when update-fn
-                                          (when (active-minibuffer-window)
-                                            (with-selected-window
-                                                (active-minibuffer-window)
-                                              (funcall update-fn logins text))))))))))))
-                          nil
-                          t)))
-          (completing-read
-           "User: "
-           (completion-table-dynamic
-            (lambda (_text)
-              logins))
-           nil nil))
-      (setq done t))))
+  (gh-repo-async-comp-read "User: " "search/users"
+                           'gh-repo-github-user
+                           nil
+                           'login))
 
 (defun gh-repo-search-users (str page query &optional callback)
   "Send an asynchronous request to GitHub's CODE search API.
@@ -1448,9 +1515,11 @@ Return the category metadatum as the type of the target."
   "Retrieve user input from the minibuffer in GitHub repository."
   (when-let ((wind (active-minibuffer-window)))
     (with-selected-window wind
-      (let ((str (string-trim (buffer-substring-no-properties
-                               (minibuffer-prompt-end)
-                               (line-end-position)))))
+      (let ((str (string-trim (or (car (split-string (buffer-substring-no-properties
+                                                      (minibuffer-prompt-end)
+                                                      (line-end-position))
+                                                     "[\n]" t))
+                                  ""))))
         (unless (string-empty-p str)
           str)))))
 
@@ -1505,6 +1574,26 @@ ACTION to perform on the repository."
   (or gh-repo--cached-auth-data
       (setq gh-repo--cached-auth-data
             (gh-repo--read-auth-from-gh-config))))
+
+(defun gh-repo-make-query (code search-query &optional page per_page)
+  "Construct a GitHub repository search query with optional pagination.
+
+Argument CODE is a string representing the code to search for in the repository.
+
+Argument SEARCH-QUERY is a string representing the additional search query.
+
+Optional argument PAGE is an integer representing the page number of the search
+results.
+
+Optional argument PER_PAGE is an integer representing the number of results per
+page."
+  (let* ((q (string-join (delq nil
+                               (list code search-query))
+                         "")))
+    (seq-filter #'cdr
+                `((q . ,q)
+                  (page . ,page)
+                  (per_page . ,per_page)))))
 
 (defun gh-repo-search-repos-request (code page &optional search-query callback)
   "Send an asynchronous request to GitHub's CODE search API.
@@ -1648,9 +1737,12 @@ candidates."
   (lambda ()
     gh-repo-default-arguments)
   ["New repository arguments"
-   ("n" "name" "--name=")
-   ("d" "description" "--description=" :class transient-option)
-   ("p" "private" "--private")
+   ("n" "name" "--name=" :unsavable t)
+   ("d" "description" "--description="
+    :class transient-option
+    :unsavable t)
+   ("p" "private" "--private"
+    :unsavable t)
    ("l" "license_template" "--license_template="
     :class transient-option
     :choices (lambda (&rest _)
@@ -1689,7 +1781,13 @@ candidates."
                                'face 'transient-value)))))]
   ["Search query"
    ("l" "language" "--language="
-    :choices gh-repo--get-languages)
+    :choices (lambda ()
+               (setq gh-repo--search-langs-alist (or gh-repo--search-langs-alist
+                                                     (gh-repo--init-languages)))
+               (setq gh-repo--search-langs
+                     (or gh-repo--search-langs
+                         (mapcan #'cdr (copy-tree
+                                        gh-repo--search-langs-alist))))))
    ("s" "Search for repos" gh-repo-search-internal-repos :transient nil)]
   ["Actions"
    ("o" "Clone other user repo" gh-repo-clone-other-user-repo)
