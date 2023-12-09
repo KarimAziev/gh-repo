@@ -1518,7 +1518,7 @@ Return the category metadatum as the type of the target."
       (let ((str (string-trim (or (car (split-string (buffer-substring-no-properties
                                                       (minibuffer-prompt-end)
                                                       (line-end-position))
-                                                     "[\n]" t))
+                                                     nil t))
                                   ""))))
         (unless (string-empty-p str)
           str)))))
