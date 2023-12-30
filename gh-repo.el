@@ -614,13 +614,6 @@ successfully."
            (when (fboundp 'comint-output-filter)
              (set-process-filter proc #'comint-output-filter)))))
 
-(defun gh-repo-auth-info-password (auth-info)
-  "Return secret from AUTH-INFO."
-  (let ((secret (plist-get auth-info :secret)))
-    (if (functionp secret)
-        (funcall secret)
-      secret)))
-
 (defun gh-repo--auth-source-get (keys &rest spec)
   "Retrieve authentication data for GitHub repositories.
 
@@ -1108,15 +1101,6 @@ If ACTION is nil read it from `gh-repo-actions'."
               (funcall (nth 2 choice) repo)
             choice))))))
 
-(defun gh-repo-retrieve-logins (alist)
-  "Retrieve user logins from a given ALIST.
-
-Argument ALIST is a list where each element is a cons cell that contains a
-`key-value' pair."
-  (mapcar
-   (apply-partially #'alist-get 'login)
-   (alist-get 'items alist)))
-
 (defvar gh-repo-minibuffer-timer nil)
 (defun gh-repo-debounce--run-in-buffer (buffer timer-sym fn &rest args)
   "Run a function FN in a BUFFER and cancel timer TIMER-SYM.
@@ -1247,12 +1231,6 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
 
 (defvar gh-repo-repos-hash (make-hash-table :test #'equal))
 (defvar gh-repo-last-query nil)
-
-(defun gh-repo-hash-keys ()
-  "Extract keys from the `gh-repo-repos-hash' hash table."
-  (hash-table-keys gh-repo-repos-hash))
-
-
 
 (defun gh-repo-search-repos (&optional query)
   "Search and interactively select GitHub repositories using a QUERY.
@@ -1404,34 +1382,6 @@ full data associated with the selected candidate instead of just the name."
                            'gh-repo-github-user
                            nil
                            'login))
-
-(defun gh-repo-search-users (str page query &optional callback)
-  "Send an asynchronous request to GitHub's CODE search API.
-
-Argument STR is the string segment or keyword that the user wants to
-search for in the GitHub users api.
-Argument QUERY is an optional additional search term that can be used to
-refine the search results.
-Argument PAGE is the specific PAGE number of the search results that the
-user wants to view.
-Argument CALLBACK is a function that will be called once the search
-results are returned, with the search results passed as an argument."
-  (let ((q (string-join (delq nil
-                              (list str query))
-                        "")))
-    (if callback
-        (gh-repo-get
-         (concat "search/users?q=" q
-                 (format "&per_page=100&page=%s" page))
-         nil
-         :host "api.github.com"
-         :callback (lambda (value &rest _)
-                     (funcall callback value)))
-      (gh-repo-get
-       (concat "search/users?q=" q
-               (format "&per_page=100&page=%s" page))
-       nil
-       :host "api.github.com"))))
 
 (defun gh-repo-minibuffer-get-metadata ()
   "Return current minibuffer completion metadata."
@@ -1634,37 +1584,6 @@ page."
                   (page . ,page)
                   (per_page . ,per_page)))))
 
-(defun gh-repo-search-repos-request (code page &optional search-query callback)
-  "Send an asynchronous request to GitHub's CODE search API.
-
-Argument CODE is the code segment or keyword that the user wants to
-search for in the GitHub codebase.
-Argument SEARCH-QUERY is an optional additional search term that can be used to
-refine the search results.
-Argument PAGE is the specific PAGE number of the search results that the
-user wants to view.
-Argument CALLBACK is a function that will be called once the search
-results are returned, with the search results passed as an argument."
-  (let* ((q (string-join (delq nil
-                               (list code search-query))
-                         ""))
-         (query (seq-filter #'cdr
-                            `((q . ,q)
-                              ;; (per_page . 100)
-                              (page . ,page)))))
-    (if callback
-        (gh-repo-get
-         "/search/repositories"
-         nil
-         :query query
-         :host "api.github.com"
-         :callback callback)
-      (gh-repo-get
-       (concat "search/repositories?q=" q
-               (format "&per_page=100&page=%s" (or page 1)))
-       nil
-       :host "api.github.com"))))
-
 ;;;###autoload
 (defun gh-repo-clone-other-user-repo (name)
   "Clone other user's NAME repository."
@@ -1749,26 +1668,6 @@ results are returned, with the search results passed as an argument."
              (setq acc (concat acc separator query ":" value))))))
      '("--language=")
      "")))
-
-(defun gh-repo--get-languages (str pred action)
-  "Initialize and complete GitHub languages based on given parameters.
-
-Argument STR is a string that is used as the input for the completion
-function.
-Argument PRED is a predicate function that filters the completion
-candidates.
-Argument ACTION is an ACTION to be performed on the completion
-candidates."
-  (setq gh-repo--search-langs-alist (or gh-repo--search-langs-alist
-                                        (gh-repo--init-languages)))
-  (setq gh-repo--search-langs
-        (or gh-repo--search-langs
-            (mapcan #'cdr (copy-tree
-                           gh-repo--search-langs-alist))))
-  (if (eq action 'metadata)
-      nil
-    (complete-with-action action gh-repo--search-langs str pred)))
-
 
 (defvar-local gh-repo-req-buffer nil)
 ;;;###autoload
