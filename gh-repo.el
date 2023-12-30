@@ -6,7 +6,7 @@
 ;; URL: https://github.com/KarimAziev/gh-repo
 ;; Keywords: lisp, vc, tools
 ;; Version: 1.0.0
-;; Package-Requires: ((emacs "29.1") (request "0.3.2") (transient "0.4.1") (ghub "3.6.0"))
+;; Package-Requires: ((emacs "29.1") (request "0.3.2") (transient "0.4.3") (ghub "3.6.0") (project "0.10.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -54,10 +54,8 @@
 (declare-function ivy-state-preselect "ivy")
 (declare-function ivy--preselect-index "ivy")
 (declare-function ivy--recompute-index "ivy")
-(declare-function ivy-set-index "ivy")
 (declare-function ivy-alist-setting "ivy")
 (declare-function ivy-re-to-str "ivy")
-(declare-function ivy--sort-maybe "ivy")
 (declare-function ivy--set-candidates "ivy")
 (declare-function ivy-state-current "ivy")
 
@@ -161,6 +159,7 @@ ACTION is a a function which should accept one argument
   :group 'gh-repo)
 
 (defcustom gh-repo-annotation-spec-alist '((description "%s" 40)
+                                           (language "%s" 20)
                                            (visibility "👁️%s" 20)
                                            (stargazers_count "⭐%s" 10)
                                            (open_issues "⁉️%s" 10))
@@ -765,22 +764,21 @@ The default value is nil."
             (t
              (error "Request failed"))))))
 
-(defun gh-repo-values-to-columns (data)
-  "Convert repository values to columns.
+(defun gh-repo-values-to-columns (spec data)
+  "Transform repository DATA into formatted columns.
 
-Converts values in DATA to columns using the format specified in
-`gh-repo-annotation-spec-alist'.
-Each value is formatted using the corresponding format string and padded to
-the specified width.
+Argument SPEC is a list where each element is a list containing a key, a format
+string, and a width for the column.
 
-Returns a string with the formatted values separated by newlines."
+Argument DATA is an alist where each key corresponds to a column key in SPEC and
+its value is the DATA to be formatted for that column."
   (mapconcat
    (pcase-lambda (`(,key ,format-str ,width))
      (let ((value (alist-get key data))
            (space-char 32))
        (truncate-string-to-width (format format-str (or value "")) width
                                  0 space-char t)))
-   gh-repo-annotation-spec-alist " "))
+   spec " "))
 
 (defun gh-repo-plist-omit (keys plist)
   "Remove KEYS and values from PLIST."
@@ -942,6 +940,7 @@ Argument URL is the url of a GitHub gist."
                          (setq maxlen (1+ (length key))))
                        (let* ((data (gethash key response))
                               (annot-str (gh-repo-values-to-columns
+                                          gh-repo-annotation-spec-alist
                                           data)))
                          (concat (make-string (- maxlen (length key)) ?\ )
                                  " "
@@ -1108,6 +1107,7 @@ If ACTION is nil read it from `gh-repo-actions'."
                    (functionp (nth 2 choice)))
               (funcall (nth 2 choice) repo)
             choice))))))
+
 (defun gh-repo-retrieve-logins (alist)
   "Retrieve user logins from a given ALIST.
 
@@ -1217,24 +1217,33 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
 
 (defun gh-repo-minibuffer-get-update-fn ()
   "Update the minibuffer's completion candidates based on the current mode."
-  (pcase completing-read-function
-    ((guard (bound-and-true-p helm-mode))
-     (when (fboundp 'helm-force-update)
-       (lambda (_items cand)
-         (helm-force-update cand))))
-    ('ivy-completing-read
-     (when (and (fboundp 'ivy-update-candidates))
-       (lambda (items _input)
-         (gh-repo-update-ivy-cands items))))
-    ((guard (bound-and-true-p icomplete-mode))
-     (lambda (&rest _)
-       (completion--flush-all-sorted-completions)
-       (when (fboundp 'icomplete-exhibit)
-         (icomplete-exhibit))))
-    ('completing-read-default
-     (lambda (&rest _)
-       (completion--flush-all-sorted-completions)
-       (minibuffer-completion-help)))))
+  (let ((fn
+         (pcase completing-read-function
+           ((guard (bound-and-true-p helm-mode))
+            (when (fboundp 'helm-force-update)
+              (lambda (_items cand)
+                (helm-force-update cand))))
+           ('ivy-completing-read
+            (when (and (fboundp 'ivy-update-candidates))
+              (lambda (items _input)
+                (gh-repo-update-ivy-cands
+                 items))))
+           ((guard (bound-and-true-p icomplete-mode))
+            (lambda (&rest _)
+              (completion--flush-all-sorted-completions)
+              (when (fboundp 'icomplete-exhibit)
+                (icomplete-exhibit))))
+           ('completing-read-default
+            (lambda (&rest _)
+              (completion--flush-all-sorted-completions)
+              (minibuffer-completion-help)))
+           (_
+            (lambda (&rest _)
+              (completion--flush-all-sorted-completions))))))
+    (lambda (&rest args)
+      (when-let ((wind (active-minibuffer-window)))
+        (with-selected-window wind
+          (apply fn args))))))
 
 (defvar gh-repo-repos-hash (make-hash-table :test #'equal))
 (defvar gh-repo-last-query nil)
@@ -1252,32 +1261,39 @@ Optional argument QUERY is a string that specifies the search QUERY."
   (interactive (list (gh-repo-get-search-query)))
   (setq gh-repo-last-query query)
   (setq this-command 'gh-repo-search-repos)
-  (gh-repo-async-comp-read "Repo: " "/search/repositories"
-                           'gh-repo-search-repos
-                           query
-                           'full_name
-                           'gh-repo-values-to-columns))
+  (let ((data (gh-repo-async-comp-read "Repo: " "/search/repositories"
+                                       'gh-repo-search-repos
+                                       query
+                                       'name
+                                       (apply-partially
+                                        #'gh-repo-values-to-columns
+                                        gh-repo-annotation-spec-alist)
+                                       t)))
+    (alist-get 'full_name data)))
 
 
 (defun gh-repo-async-comp-read (prompt url caller query hash-key &optional
-                                       annotate-fn)
-  "Fetch GitHub repo data with minibuffer completion.
+                                       annotate-fn full-data)
+  "Fetch GitHub repo data asynchronously with completion.
 
 Argument PROMPT is a string displayed as the prompt in the minibuffer.
 
-Argument URL is a string representing the endpoint to which the HTTP request is
-made.
+Argument URL is a string representing the GitHub API endpoint to query.
 
 Argument CALLER is a symbol representing the command that invoked the
 completion.
 
-Argument QUERY is a plist containing additional parameters for the HTTP request.
+Argument QUERY is a string or list representing additional query parameters for
+the GitHub API request.
 
 Argument HASH-KEY is a symbol or string used to extract the relevant value from
-the JSON response.
+the API response.
 
-Optional argument ANNOTATE-FN is a function that takes an item and returns an
-annotation string."
+Optional argument ANNOTATE-FN is a function that takes a single argument and
+returns an annotation string for each candidate.
+
+Optional argument FULL-DATA is a boolean; when non-nil, the function returns the
+full data associated with the selected candidate instead of just the name."
   (gh-repo-authenticate)
   (when caller
     (setq this-command caller))
@@ -1285,6 +1301,7 @@ annotation string."
          (done)
          (update-fn
           (gh-repo-minibuffer-get-update-fn))
+         (prefix-hash (make-hash-table :test #'equal))
          (maxlen 90)
          (annotf
           (when annotate-fn
@@ -1296,13 +1313,14 @@ annotation string."
                      (str (concat
                            (propertize " " 'display
                                        `(space :align-to
-                                               ,maxlen))
+                                         ,maxlen))
                            annot-str)))
                 str))))
+         (all-cands)
+         (last-text)
          (handler
           (lambda (text)
             (unless done
-              (message "searching... %s" text)
               (gh-repo-get
                url
                nil
@@ -1313,46 +1331,67 @@ annotation string."
                :host "api.github.com"
                :callback
                (lambda (resp _headers _status _req)
-                 (message nil)
-                 (let ((items (alist-get 'items resp))
-                       (str (gh-repo-get-minibuffer-input))
-                       (miniwind (active-minibuffer-window))
-                       (keys))
-                   (dolist (item items)
-                     (let ((name
-                            (alist-get hash-key item)))
-                       (push name keys)
-                       (puthash name item hash)))
-                   (when (and miniwind items text str (equal text str))
-                     (with-selected-window
-                         miniwind
+                 (unless done
+                   (let ((items (alist-get 'items resp))
+                         (str (gh-repo-get-minibuffer-input))
+                         (keys))
+                     (puthash text items prefix-hash)
+                     (dolist (item items)
+                       (let ((name
+                              (alist-get hash-key item)))
+                         (push name keys)
+                         (unless (member name all-cands)
+                           (push name all-cands))
+                         (puthash name item hash)))
+                     (when (and items text str (equal text str))
                        (funcall update-fn keys text)))))))))
          (hook-fn (lambda (&rest _)
-                    (let ((text
-                           (gh-repo-get-minibuffer-input)))
-                      (unless (or (not text)
-                                  (string-empty-p text))
-                        (gh-repo-debounce
-                         'gh-repo-minibuffer-timer
-                         0.5
-                         handler text))))))
+                    (when-let ((text
+                                (gh-repo-get-minibuffer-input)))
+                      (unless (or done
+                                  (and last-text
+                                       (string= last-text text)))
+                        (setq last-text text)
+                        (if-let ((cache (gethash text prefix-hash)))
+                            (gh-repo-debounce
+                             'gh-repo-minibuffer-timer
+                             0.5
+                             update-fn (mapcar (lambda (item)
+                                                 (alist-get hash-key item))
+                                               cache)
+                             text)
+                          (gh-repo-debounce
+                           'gh-repo-minibuffer-timer
+                           0.5
+                           handler text)))))))
     (unwind-protect
         (minibuffer-with-setup-hook
             (lambda ()
               (when (minibufferp)
                 (use-local-map (make-composed-keymap gh-repo-minibuffer-map
                                                      (current-local-map)))
-                (add-hook 'after-change-functions hook-fn nil t)))
-          (completing-read
-           prompt
-           (lambda (str pred action)
-             (if (and annotf
-                      (eq action 'metadata))
-                 `(metadata
-                   (annotation-function . ,annotf))
-               (complete-with-action action (hash-table-keys hash)
-                                     str pred)))
-           nil nil))
+                (add-hook 'after-change-functions hook-fn nil t)
+                (add-hook 'minibuffer-exit-hook (lambda ()
+                                                  (setq done t)
+                                                  (when
+                                                      (timerp
+                                                       gh-repo-minibuffer-timer)
+                                                    (cancel-timer
+                                                     gh-repo-minibuffer-timer)))
+                          nil t)))
+          (let ((result (completing-read
+                         prompt
+                         (lambda (str pred action)
+                           (if (and annotf
+                                    (eq action 'metadata))
+                               `(metadata
+                                 (annotation-function . ,annotf))
+                             (complete-with-action action (hash-table-keys hash)
+                                                   str pred)))
+                         nil nil)))
+            (if full-data
+                (gethash result hash)
+              result)))
       (setq done t))))
 
 
@@ -1729,6 +1768,131 @@ candidates."
   (if (eq action 'metadata)
       nil
     (complete-with-action action gh-repo--search-langs str pred)))
+
+
+(defvar-local gh-repo-req-buffer nil)
+;;;###autoload
+(defun gh-repo-list-repos ()
+  "List user's GitHub repositories in a buffer."
+  (interactive)
+  (let* ((spec '((full_name "%s" 35)
+                 (language "%s" 20)
+                 (description "%s" 65)
+                 (forks_count "%s" 3)
+                 (stargazers_count "%s" 3)
+                 (watchers_count "%s" 3)
+                 (open_issues_count "%s" 3)))
+         (buff (get-buffer-create "gh-repo-user-repos"))
+         (rendered)
+         (annotf (lambda (data)
+                   (mapconcat
+                    (pcase-lambda (`(,key ,format-str ,width))
+                      (let ((value (alist-get key data))
+                            (space-char 32))
+                        (truncate-string-to-width (format format-str (or value
+                                                                         ""))
+                                                  width
+                                                  0
+                                                  space-char
+                                                  t)))
+                    spec " "))))
+    (with-current-buffer buff
+      (when (buffer-live-p gh-repo-req-buffer)
+        (let ((message-log-max nil))
+          (with-temp-message (or (current-message) "")
+            (kill-buffer gh-repo-req-buffer))))
+      (erase-buffer)
+      (insert (funcall annotf `((full_name . "Name")
+                                (language . "Language")
+                                (description . "Description")
+                                (forks_count . "Forks")
+                                (stargazers_count . "Stars")
+                                (watchers_count . "Watchers")
+                                (open_issues_count . "Issues"))))
+      (when (and (not (get-buffer-window buff)))
+        (pop-to-buffer-same-window buff))
+      (setq gh-repo-req-buffer
+            (gh-repo-get (concat "user/repos") nil
+                         :query `((per_page . ,gh-repo-default-repos-limit))
+                         :callback
+                         (lambda (value _headers _status req)
+                           (when (buffer-live-p buff)
+                             (with-current-buffer buff
+                               (save-excursion
+                                 (goto-char (point-max))
+                                 (dolist (item value)
+                                   (let ((name (alist-get 'full_name item)))
+                                     (unless (member name rendered)
+                                       (push name rendered)
+                                       (puthash name item gh-repo-repos-hash)
+                                       (let ((line (funcall annotf item)))
+                                         (insert "\n" line)))))))
+                             (ghub-continue req))))))))
+(require 'vtable)
+
+;;;###autoload
+(defun gh-repo-list-vtable ()
+  "List user repositories in a formatted table."
+  (interactive)
+  (gh-repo-authenticate)
+  (let ((buff (get-buffer-create "gh-repo-user-repos")))
+    (with-current-buffer buff
+      (when (buffer-live-p gh-repo-req-buffer)
+        (let ((message-log-max nil))
+          (with-temp-message (or (current-message) "")
+            (kill-buffer gh-repo-req-buffer))))
+      (let ((inhibit-read-only t))
+        (erase-buffer))
+      (when (and (not (get-buffer-window buff)))
+        (pop-to-buffer-same-window buff))
+      (setq gh-repo-req-buffer
+            (gh-repo-get (concat "user/repos") nil
+                         :query `((per_page . ,gh-repo-default-repos-limit))
+                         :callback
+                         (lambda (value _headers _status req)
+                           (when (buffer-live-p buff)
+                             (with-current-buffer buff
+                               (setq buffer-read-only t)
+                               (let ((inhibit-read-only t))
+                                 (erase-buffer)
+                                 (gh-repo-list--render value)))
+                             (ghub-continue req))))))))
+
+(defun gh-repo-list--render (data)
+  "Display repository DATA in a formatted table.
+
+Argument DATA is the data to be rendered by the function."
+  (let ((spec `((full_name . "Name")
+                (language . "Language")
+                (description . "Description")
+                (forks_count . "Forks")
+                (stargazers_count . "Stars")
+                (watchers_count . "Watchers")
+                (open_issues_count . "Issues"))))
+    (make-vtable
+     :columns
+     `((:name ,(cdr (assq 'full_name spec))
+        :width 20)
+       (:name ,(cdr (assq 'language spec))
+        :width 10)
+       (:name ,(cdr (assq 'description spec))
+        :width 65)
+       (:name ,(cdr (assq 'forks_count spec))
+        :width 5)
+       (:name ,(cdr (assq 'stargazers_count spec))
+        :width 5
+        :primary descend)
+       (:name ,(cdr (assq 'watchers_count spec))
+        :width 5)
+       (:name ,(cdr (assq 'open_issues_count spec))))
+     :divider " "
+     :objects data
+     :getter (lambda (object column vtable)
+               (pcase-let* ((`(,_key . ,col-data) object)
+                            (col-name (vtable-column vtable column))
+                            (field (car (rassoc col-name spec)))
+                            (value (cdr (assq field col-data))))
+                 (or value ""))))))
 
 ;;;###autoload (autoload 'gh-repo-menu "gh-repo" nil t)
 (transient-define-prefix gh-repo-menu ()
