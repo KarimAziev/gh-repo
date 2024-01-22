@@ -1040,10 +1040,10 @@ If the result of PRED is nil, return the argument as is."
     (setq fn (pop functions))
     (lambda (&rest args)
       (let ((arg
-             (unless (null (flatten-list args))
+             (when (flatten-list args)
                (apply fn args))))
         (while (setq fn
-                     (unless (null arg)
+                     (when arg
                        (pop functions)))
           (let ((res (apply fn (list arg))))
             (setq arg res)))
@@ -1115,10 +1115,9 @@ Argument FILE is the name of the file to read SSH host configurations from."
 
 (defun gh-repo-util-https-url-p (url)
   "Return t if URL string is githost with https protocol."
-  (not (null
-        (string-match-p
-         (concat "https://" gh-repo-util-host-regexp)
-         url))))
+  (string-match-p
+   (concat "https://" gh-repo-util-host-regexp)
+   url))
 
 (defun gh-repo-util-url-https-to-ssh (url &optional ssh-host)
   "Transform URL with https protocol to ssh.
@@ -2483,20 +2482,22 @@ Argument TIME is the time value that will be compared with the current time to
 calculate the time difference."
   (let ((diff-secs (- (float-time (current-time))
                       (float-time time))))
-    (pcase-let ((`(,format-str . ,value)
-                 (cond ((< diff-secs 60)
-                        (cons "%d second" (truncate diff-secs)))
-                       ((< diff-secs 3600)
-                        (cons "%d minute" (truncate (/ diff-secs 60))))
-                       ((< diff-secs 86400)
-                        (cons "%d hour" (truncate (/ diff-secs 3600))))
-                       ((< diff-secs 2592000)
-                        (cons "%d day" (truncate (/ diff-secs 86400))))
-                       ((< diff-secs 31536000)
-                        (cons "%d month" (truncate (/ diff-secs 2592000))))
-                       (t
-                        (cons "%d year" (truncate (/ diff-secs 31536000)))))))
-      (format (concat format-str (if (= value 1) " ago" "s ago")) value))))
+    (pcase-let* ((`(,format-str . ,value)
+                  (cond ((< diff-secs 60)
+                         (cons "%d second" (truncate diff-secs)))
+                        ((< diff-secs 3600)
+                         (cons "%d minute" (truncate (/ diff-secs 60))))
+                        ((< diff-secs 86400)
+                         (cons "%d hour" (truncate (/ diff-secs 3600))))
+                        ((< diff-secs 2592000)
+                         (cons "%d day" (truncate (/ diff-secs 86400))))
+                        ((< diff-secs 31536000)
+                         (cons "%d month" (truncate (/ diff-secs 2592000))))
+                        (t
+                         (cons "%d year" (truncate (/ diff-secs 31536000))))))
+                 (format-str-pl (concat format-str (if (= value 1) " ago"
+                                                     "s ago"))))
+      (format format-str-pl value))))
 
 
 
