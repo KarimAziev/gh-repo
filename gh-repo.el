@@ -59,7 +59,23 @@
                                        'background-color)
                                       40))
 
-(defcustom gh-repo-search-code-queries '(("language"
+(defcustom gh-repo-search-code-queries '(("in"
+                                          :choices
+                                          ("name" "topics"
+                                           "name,topics" "readme"
+                                           "name,readme"
+                                           "topics,readme"
+                                           "name,topics,readme"
+                                           "decription"
+                                           "name,decription"
+                                           "topics,decription"
+                                           "name,topics,decription"
+                                           "readme,decription"
+                                           "name,readme,decription"
+                                           "topics,readme,decription"
+                                           "name,topics,readme,decription")
+                                          :class transient-option)
+                                         ("language"
                                           :choices
                                           (lambda ()
                                             (setq gh-repo--search-langs-alist (or
@@ -2388,22 +2404,6 @@ page."
         (setq obj (push new-cell obj))))
     (gh-repo-post-request obj)))
 
-;;;###autoload (autoload 'gh-repo-query-menu "gh-repo" nil t)
-(transient-define-prefix gh-repo-query-menu ()
-  "Command dispatcher for GitHub search queries."
-  [:description gh-repo-query-description
-   :setup-children
-   (lambda (&rest _argsn)
-     (mapcar
-      (apply-partially #'transient-parse-suffix
-                       transient--prefix)
-      (gh-repo-search-queries-to-options
-       gh-repo-search-code-queries)))]
-  ["Search"
-   ("l" "List repository search" gh-repo-list-search)
-   ("m" "In minibuffer" gh-repo-search-internal-repos)]
-  (interactive)
-  (transient-setup #'gh-repo-query-menu))
 
 (defun gh-repo-get-search-query ()
   "Generate a search query string from the current transient command arguments."
@@ -2703,6 +2703,8 @@ returned from the GitHub API before it is displayed."
   "List GitHub user repositories interactively."
   (interactive)
   (gh-repo-list-user-repos (car (gh-repo-authenticate))))
+
+(defvar gh-repo-search-current-term nil)
 
 ;;;###autoload
 (defun gh-repo-list-search (&optional query)
@@ -3406,7 +3408,7 @@ the padding of the inserted row."
                                      (length
                                       (split-string parent "/" t)))
                                   ?\ )
-                   "")))
+                   " ")))
     (insert padding)
     (insert row)
     (add-text-properties beg (point)
@@ -3749,7 +3751,9 @@ the fetch fails."
                      (with-current-buffer buff
                        (let ((inhibit-read-only t))
                          (goto-char (point-max))
-                         (insert "\n\n" code))
+                         (insert "\n\n" (propertize "README"
+                                                    'face 'header-line)
+                                 "\n\n" code))
                        (setq gh-repo-tree--loading nil)
                        (setq gh-repo-tree--error-loading nil)
                        (gh-repo-tree--update-header-line)
@@ -3784,7 +3788,9 @@ the fetch fails."
                             (with-current-buffer buff
                               (let ((inhibit-read-only t))
                                 (goto-char (point-max))
-                                (insert "\n\n" code))
+                                (insert "\n\n" (propertize "README"
+                                                           'face 'header-line)
+                                        "\n\n" code))
                               (setq gh-repo-tree--loading nil)
                               (setq gh-repo-tree--error-loading nil)
                               (gh-repo-tree--update-header-line)
@@ -3848,6 +3854,85 @@ Argument REPO is a string representing the GitHub repository in the format
       (setq buffer-read-only t))))
 
 (defalias 'gh-repo-run-github-explorer #'gh-repo-tree)
+
+
+(defun gh-repo--shuffle-words (words)
+  "Shuffle WORDS into all possible comma-separated combinations.
+
+Argument WORDS is a list of strings to be shuffled."
+  (let ((combo-list (list nil)))
+    (dolist (word words combo-list)
+      (setq combo-list
+            (append combo-list
+                    (mapcar (lambda (combo)
+                              (if combo
+                                  (concat combo "," word)
+                                word))
+                            combo-list))))
+    (delete nil combo-list)))
+
+
+
+
+
+(transient-define-argument gh-repo-search-term-argument ()
+  "Read description and assign it in the variable `gh-repo-search-current-term'."
+  :description "?q="
+  :class 'transient-lisp-variable
+  :always-read t
+  :reader #'read-string
+  :argument ""
+  :variable 'gh-repo-search-current-term)
+
+
+
+;;;###autoload (autoload 'gh-repo-search-menu "gh-repo" nil t)
+(transient-define-prefix gh-repo-search-menu ()
+  "Command dispatcher for GitHub search queries."
+  [:description (lambda ()
+                  (format "/search/repositories?q=%s%s"
+                          (or gh-repo-search-current-term "")
+                          (gh-repo-format-args-to-query
+                           (gh-repo-get-args-for-query))))
+   :setup-children
+   (lambda (&rest _argsn)
+     (mapcar
+      (apply-partially #'transient-parse-suffix
+                       transient--prefix)
+      (append
+       (list '("."  gh-repo-search-term-argument))
+       (delq nil
+             (mapcar (lambda (it)
+                       (cond ((equal (car it)
+                                     "+i")
+                              (setcar it "i")
+                              it)
+                             ((equal (car it)
+                                     "-i")
+                              nil)
+                             (t it)))
+                     (gh-repo-search-queries-to-options
+                      gh-repo-search-code-queries))))))]
+  ["Search and show results in"
+   ("C-c C-a" transient-echo-arguments)
+   ("m" "In minibuffer" gh-repo-search-internal-repos)
+   ("RET" "List" (lambda ()
+                   (interactive)
+                   (gh-repo--list-repos "search/repositories"
+                                        (gh-repo-make-query
+                                         (or gh-repo-search-current-term
+                                             "")
+                                         (gh-repo-format-args-to-query
+                                          (gh-repo-get-args-for-query))
+                                         nil
+                                         100)
+                                        gh-repo-list-search-columns
+                                        (apply-partially #'alist-get 'items))))]
+  (interactive)
+  (gh-repo-authenticate)
+  (transient-setup #'gh-repo-search-menu))
+
+
 
 (provide 'gh-repo)
 ;;; gh-repo.el ends here
