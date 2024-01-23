@@ -3058,6 +3058,42 @@ the major mode."
       (set-auto-mode)
       (font-lock-ensure))))
 
+(defun gh-repo--json-reader (&optional object-type array-type null-object
+                                       false-object)
+  "Parse JSON from GitHub response.
+
+Optional argument OBJECT-TYPE specifies which Lisp type is used to represent
+objects; it can be `hash-table', `alist' or `plist'. It defaults to `alist'.
+
+Optional argument ARRAY-TYPE specifies which Lisp type is used to represent
+arrays; it can be `list' or `vector'. It defaults to `vector'.
+
+Optional argument NULL-OBJECT specifies which object to use to represent a JSON
+null value. It defaults to `:null'.
+
+Optional argument FALSE-OBJECT specifies which object to use to represent a JSON
+false value. It defaults to `:false'."
+  (let ((raw (ghub--decode-payload)))
+    (and raw
+         (condition-case nil
+             (gh-repo--json-parse-string raw
+                                         object-type
+                                         array-type
+                                         null-object
+                                         false-object)
+           ((json-parse-error json-readtable-error)
+            `((message
+               . ,(if (looking-at "<!DOCTYPE html>")
+                      (if (re-search-forward
+                           "<p>\\(?:<strong>\\)?\\([^<]+\\)"
+                           nil t)
+                          (match-string 1)
+                        "error description missing")
+                    (string-trim (buffer-substring
+                                  (point)
+                                  (point-max)))))
+              (documentation_url . "https://github.com/magit/ghub/wiki/Github-Errors")))))))
+
 (defun gh-repo-tree--download-repo-path (repo-name path url &optional
                                                    search-str)
   "Download and display a file from a GitHub repository.
@@ -3099,22 +3135,7 @@ retrieved file content."
                                     err)))))
        :reader
        (lambda (&rest _)
-         (let ((raw (ghub--decode-payload)))
-           (and raw
-                (condition-case nil
-                    (gh-repo--json-parse-string raw)
-                  ((json-parse-error json-readtable-error)
-                   `((message
-                      . ,(if (looking-at "<!DOCTYPE html>")
-                             (if (re-search-forward
-                                  "<p>\\(?:<strong>\\)?\\([^<]+\\)"
-                                  nil t)
-                                 (match-string 1)
-                               "error description missing")
-                           (string-trim (buffer-substring
-                                         (point)
-                                         (point-max)))))
-                     (documentation_url . "https://github.com/magit/ghub/wiki/Github-Errors")))))))
+         (gh-repo--json-reader))
        :callback
        (lambda (data &rest _)
          (let* ((code (decode-coding-string
@@ -3255,24 +3276,9 @@ the fetch operation."
                nil
                :reader
                (lambda (&rest _)
-                 (let ((raw (ghub--decode-payload)))
-                   (and raw
-                        (condition-case nil
-                            (gh-repo--json-parse-string raw
-                                                        'alist
-                                                        'list)
-                          ((json-parse-error json-readtable-error)
-                           `((message
-                              . ,(if (looking-at "<!DOCTYPE html>")
-                                     (if (re-search-forward
-                                          "<p>\\(?:<strong>\\)?\\([^<]+\\)"
-                                          nil t)
-                                         (match-string 1)
-                                       "error description missing")
-                                   (string-trim (buffer-substring
-                                                 (point)
-                                                 (point-max)))))
-                             (documentation_url . "https://github.com/magit/ghub/wiki/Github-Errors")))))))
+                 (gh-repo--json-reader
+                  'alist
+                  'list))
                :callback (lambda (response &rest _)
                            (let* ((tree (cdr (assq 'tree response)))
                                   (value (gh-repo-tree--paths-put
@@ -3320,6 +3326,7 @@ preview."
      repo
      path
      url)))
+
 
 (defun gh-repo-tree--group-files (files)
   "Group FILES by their directory structure."
@@ -3646,12 +3653,77 @@ potentially killed."
         (delete-process proc))
       (kill-buffer buff))))
 
+(defun gh-repo--find-readme (files)
+  "Find and return the README file from a list of FILES.
+
+Argument FILES is a list of file entries where each entry is an alist containing
+file properties."
+  (seq-find
+   (lambda (it)
+     (string= "readme"
+              (downcase (file-name-sans-extension
+                         (or
+                          (cdr
+                           (assq
+                            'path
+                            it))
+                          "")))))
+   files))
+
+(defun gh-repo-tree--fetch-readme (readme-cell &optional on-success on-error)
+  "Fetch and decode a repository's README.
+
+Argument README-CELL is an association list containing repository README
+information.
+
+Optional argument ON-SUCCESS is a function called with the README content when
+the fetch is successful.
+
+Optional argument ON-ERROR is a function called with the error information when
+the fetch fails."
+  (gh-repo-get
+   (url-filename
+    (url-generic-parse-url
+     (cdr (assq 'url readme-cell))))
+   nil
+   :errorback (lambda (_err _headers status _req)
+                (let ((err
+                       (gh-repo-tree--get-status-error status)))
+                  (funcall on-error err)))
+   :reader
+   (lambda (&rest _)
+     (gh-repo--json-reader))
+   :callback
+   (lambda (data &rest _)
+     (let ((code))
+       (condition-case err
+           (setq code (with-temp-buffer
+                        (insert (decode-coding-string
+                                 (base64-decode-string
+                                  (alist-get
+                                   'content
+                                   data))
+                                 'utf-8))
+                        (gh-repo-tree--set-major-mode
+                         (cdr (assq 'path readme-cell)))
+                        (buffer-string)))
+         (error (funcall on-error err)))
+       (when code
+         (funcall on-success
+                  code))))))
+
 (defun gh-repo-tree--revert (&rest _)
   "Re-render the GitHub repository tree view."
   (let* ((repo (gh-repo-tree--current-buffer-repo))
          (tree (gh-repo-tree--paths-get
                 repo))
-         (buff (current-buffer)))
+         (buff (current-buffer))
+         (error-cb (lambda (err)
+                     (when (buffer-live-p buff)
+                       (with-current-buffer buff
+                         (setq gh-repo-tree--error-loading err)
+                         (setq gh-repo-tree--loading nil)
+                         (gh-repo-tree--update-header-line))))))
     (when gh-repo-tree--request-buffer
       (gh-repo-tree--abort-url-retrieve
        gh-repo-tree--request-buffer)
@@ -3667,6 +3739,26 @@ potentially killed."
            #'gh-repo-tree--render-tree
            (gh-repo-tree--group-files
             tree))
+          (if-let ((readme (gh-repo--find-readme tree)))
+              (progn
+                (setq gh-repo-tree--loading t)
+                (gh-repo-tree--fetch-readme
+                 readme
+                 (lambda (code)
+                   (when (buffer-live-p buff)
+                     (with-current-buffer buff
+                       (let ((inhibit-read-only t))
+                         (goto-char (point-max))
+                         (insert "\n\n" code))
+                       (setq gh-repo-tree--loading nil)
+                       (setq gh-repo-tree--error-loading nil)
+                       (gh-repo-tree--update-header-line)
+                       (goto-char (point-min)))))
+                 error-cb))
+            (setq gh-repo-tree--loading nil)
+            (setq gh-repo-tree--error-loading nil)
+            (gh-repo-tree--update-header-line)
+            (goto-char (point-min)))
           (goto-char (point-min)))
       (setq gh-repo-tree--loading t)
       (gh-repo-tree--update-header-line)
@@ -3676,9 +3768,6 @@ potentially killed."
              (lambda (value)
                (when (buffer-live-p buff)
                  (with-current-buffer buff
-                   (setq gh-repo-tree--loading nil)
-                   (setq gh-repo-tree--error-loading nil)
-                   (gh-repo-tree--update-header-line)
                    (let ((inhibit-read-only t))
                      (delete-region (point-min)
                                     (point-max))
@@ -3687,13 +3776,25 @@ potentially killed."
                       #'gh-repo-tree--render-tree
                       (gh-repo-tree--group-files
                        value)))
-                   (goto-char (point-min)))))
-             (lambda (err)
-               (when (buffer-live-p buff)
-                 (with-current-buffer buff
-                   (setq gh-repo-tree--error-loading err)
-                   (setq gh-repo-tree--loading nil)
-                   (gh-repo-tree--update-header-line)))))))))
+                   (if-let ((readme (gh-repo--find-readme value)))
+                       (gh-repo-tree--fetch-readme
+                        readme
+                        (lambda (code)
+                          (when (buffer-live-p buff)
+                            (with-current-buffer buff
+                              (let ((inhibit-read-only t))
+                                (goto-char (point-max))
+                                (insert "\n\n" code))
+                              (setq gh-repo-tree--loading nil)
+                              (setq gh-repo-tree--error-loading nil)
+                              (gh-repo-tree--update-header-line)
+                              (goto-char (point-min)))))
+                        error-cb)
+                     (setq gh-repo-tree--loading nil)
+                     (setq gh-repo-tree--error-loading nil)
+                     (gh-repo-tree--update-header-line)
+                     (goto-char (point-min))))))
+             error-cb)))))
 
 (define-derived-mode gh-repo-tree-mode special-mode
   "Github Repository Tree Viewer."
