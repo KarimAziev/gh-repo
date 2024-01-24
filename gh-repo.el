@@ -2816,6 +2816,8 @@ configuration."
               (list '("s" "Search for repos" gh-repo-search-internal-repos
                       :transient nil)))))]
   ["Actions"
+   ("i" "list my repos" gh-repo-list-repos)
+   ("r" "list other user repos" gh-repo-list-user-repos)
    ("o" "Clone other user repo" gh-repo-clone-other-user-repo)
    ("c" "Clone my repo" gh-repo-clone-repo)
    ("R" "Remove my repo" gh-repo-delete)
