@@ -30,7 +30,6 @@
 
 ;;; Code:
 
-
 (eval-when-compile
   (require 'subr-x))
 
@@ -39,20 +38,15 @@
 (defvar json-false)
 (defvar json-null)
 
-
 (require 'vtable)
-
 (require 'url-parse)
 (require 'color)
 (require 'project)
-
 (require 'ghub)
 
 (defvar gh-repo--search-langs-alist nil)
 (defvar gh-repo--search-langs nil)
 (defvar gh-repo--cached-auth-data nil)
-
-
 (defvar gh-repo-special-color-column (color-darken-name
                                       (frame-parameter
                                        (selected-frame)
@@ -110,7 +104,6 @@ Argument V is a string representing an ISO 8601 time."
         (gh-repo-format-time-diff
          (parse-iso8601-time-string v)))
    ""))
-
 
 (define-widget 'gh-repo-list-format 'lazy
   "Format for columns in GitHub repository listing display.
@@ -336,7 +329,6 @@ desired column specifications."
                      (const ascend)
                      (const descend)))))))
 
-
 (defcustom gh-repo-list-new-repo-columns nil
   "Configuration for columns in GitHub repository listing display.
 
@@ -546,7 +538,6 @@ desired column specifications."
                      (const ascend)
                      (const descend)))))))
 
-
 (defcustom gh-repo-list-user-repo-columns `((:name "Name"
                                              :field-path name
                                              :width 25)
@@ -737,7 +728,6 @@ Each column is defined by a property list with specific keys.
      ‘:color' - the color of the column's content."
   :group 'gh-repo
   :type 'gh-repo-list-format)
-
 
 (defun gh-repo-search-queries-to-options (queries)
   "Convert GitHub code search QUERIES into command line options.
@@ -1589,7 +1579,7 @@ to the `ghub-get' function."
            :auth (cdr auth)
            :username (car auth)
            (gh-repo--plist-omit '(:query)
-                               args))))
+                                args))))
 
 (defun gh-repo--ivy-read-repo (prompt url)
   "Read a repo in the minibuffer, with Ivy completion.
@@ -2076,9 +2066,8 @@ full data associated with the selected candidate instead of just the name."
                 (add-hook 'after-change-functions hook-fn nil t)
                 (add-hook 'minibuffer-exit-hook (lambda ()
                                                   (setq done t)
-                                                  (when
-                                                      (timerp
-                                                       gh-repo-minibuffer-timer)
+                                                  (when (timerp
+                                                         gh-repo-minibuffer-timer)
                                                     (cancel-timer
                                                      gh-repo-minibuffer-timer)))
                           nil t)))
@@ -2404,7 +2393,6 @@ page."
         (setq obj (push new-cell obj))))
     (gh-repo-post-request obj)))
 
-
 (defun gh-repo-get-search-query ()
   "Generate a search query string from the current transient command arguments."
   (gh-repo-format-args-to-query
@@ -2474,7 +2462,6 @@ page."
                                          (insert "\n" line)))))))
                              (ghub-continue req))))))))
 
-
 (defun gh-repo-format-time-diff (time)
   "Calculate and format the time difference from the current TIME.
 
@@ -2498,8 +2485,6 @@ calculate the time difference."
                  (format-str-pl (concat format-str (if (= value 1) " ago"
                                                      "s ago"))))
       (format format-str-pl value))))
-
-
 
 (defun gh-repo--pipe (&rest fns)
   "Compose FNS into a single composite function.
@@ -2535,8 +2520,6 @@ function, right-to-left.  If no FNS are given, return a variadic
           ((lambda (&optional arg &rest _) arg)))))
 
 (require 'parse-time)
-
-
 
 (defun gh-repo-list-action (action item)
   "Execute ACTION on the repository's full name from ITEM.
@@ -2615,7 +2598,6 @@ of the repository list."
                                 #'gh-repo-list-action
                                 #'gh-repo-tree-no-select)))
             props))))
-
 
 (defun gh-repo-list-revert ()
   "Refresh the GitHub repository list and update the display."
@@ -2735,7 +2717,6 @@ extract data from a repository object."
     ((pred (listp))
      (apply #'gh-repo--pipe
             (mapcar #'gh-repo-list-map-getter getter)))))
-
 
 (defun gh-repo-list-map-columns (columns)
   "Transform each column in COLUMNS with new getter functions.
@@ -3337,7 +3318,6 @@ preview."
      path
      url)))
 
-
 (defun gh-repo-tree--group-files (files)
   "Group FILES by their directory structure."
   (let ((tree (gh-repo-tree--group-files-1
@@ -3889,10 +3869,6 @@ Argument WORDS is a list of strings to be shuffled."
                             combo-list))))
     (delete nil combo-list)))
 
-
-
-
-
 (transient-define-argument gh-repo-search-term-argument ()
   "Read description and assign it in the variable `gh-repo-search-current-term'."
   :description "?q="
@@ -3901,8 +3877,6 @@ Argument WORDS is a list of strings to be shuffled."
   :reader #'read-string
   :argument ""
   :variable 'gh-repo-search-current-term)
-
-
 
 ;;;###autoload (autoload 'gh-repo-search-menu "gh-repo" nil t)
 (transient-define-prefix gh-repo-search-menu ()
@@ -3949,8 +3923,6 @@ Argument WORDS is a list of strings to be shuffled."
   (interactive)
   (gh-repo-authenticate)
   (transient-setup #'gh-repo-search-menu))
-
-
 
 (provide 'gh-repo)
 ;;; gh-repo.el ends here
