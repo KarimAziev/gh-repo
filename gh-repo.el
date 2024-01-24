@@ -1,6 +1,6 @@
 ;;; gh-repo.el --- Create and manage gh repositories -*- lexical-binding: t -*-
 
-;; Copyright © 2020-2022 Karim Aziiev <karim.aziiev@gmail.com>
+;; Copyright © 2020-2023 Karim Aziiev <karim.aziiev@gmail.com>
 
 ;; Author: Karim Aziiev <karim.aziiev@gmail.com>
 ;; URL: https://github.com/KarimAziev/gh-repo
