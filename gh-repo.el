@@ -3243,24 +3243,30 @@ error details."
                                                   err))))))
                        " "))))
 
+(defun gh-repo--get-other-wind ()
+  "Return another window or split sensibly if needed."
+  (let ((wind-target
+         (if (minibuffer-selected-window)
+             (with-minibuffer-selected-window
+               (let ((wind (selected-window)))
+                 (or
+                  (window-right wind)
+                  (window-left wind)
+                  (split-window-sensibly)
+                  wind)))
+           (let ((wind (selected-window)))
+             (or
+              (window-right wind)
+              (window-left wind)
+              (split-window-sensibly)
+              wind)))))
+    wind-target))
+
 (defmacro gh-repo-tree--window-with-other-window (&rest body)
   "Execute BODY in other window.
 If other window doesn't exists, split selected window right."
   `(with-selected-window
-       (let ((wind-target
-              (if (minibuffer-window-active-p (selected-window))
-                  (with-minibuffer-selected-window
-                    (let ((wind (selected-window)))
-                     (or
-                      (window-right wind)
-                      (window-left wind)
-                      (progn (split-window-sensibly) wind))))
-                (let ((wind (selected-window)))
-                 (or
-                  (window-right wind)
-                  (window-left wind)
-                  (progn (split-window-sensibly) wind))))))
-        wind-target)
+       (gh-repo--get-other-wind)
      (progn ,@body)))
 
 (defun gh-repo-tree--fetch-repo-tree (repo &optional callback on-error)
@@ -3829,8 +3835,25 @@ Argument REPO is a string representing the GitHub repository in the format
   (interactive (list (or (gh-repo-tree--current-buffer-repo)
                          (gh-repo-search-repos)
                          (read-string "User and repository (user/repo): "))))
-  (with-selected-window (selected-window)
-    (gh-repo-tree repo)))
+  (let ((buff (gh-repo-tree--setup-repo-buffer repo)))
+    (unless (get-buffer-window buff)
+      (gh-repo-tree--window-with-other-window
+       (pop-to-buffer-same-window buff)))))
+
+(defun gh-repo-tree--setup-repo-buffer (repo)
+  "Create and setup a buffer for GitHub repository file tree.
+
+Argument REPO is a string representing the GitHub repository in the format
+\"owner/repo\"."
+  (let ((buff (get-buffer-create (concat
+                                  gh-repo-tree-file-buffer-name-prefix
+                                  repo))))
+    (with-current-buffer buff
+      (let ((inhibit-read-only t))
+        (gh-repo-tree-mode)
+        (gh-repo-tree--revert)
+        (setq buffer-read-only t)
+        buff))))
 
 ;;;###autoload
 (defun gh-repo-tree (repo)
@@ -3841,20 +3864,13 @@ Argument REPO is a string representing the GitHub repository in the format
   (interactive (list (or (gh-repo-tree--current-buffer-repo)
                          (gh-repo-search-repos)
                          (read-string "User and repository (user/repo): "))))
-  (let ((buff (get-buffer-create (concat
-                                  gh-repo-tree-file-buffer-name-prefix
-                                  repo))))
-    (with-current-buffer buff
-      (let ((inhibit-read-only t))
-        (gh-repo-tree-mode)
-        (gh-repo-tree--revert)
-        (unless (get-buffer-window buff)
-          (gh-repo-tree--window-with-other-window
-           (pop-to-buffer-same-window buff))))
-      (setq buffer-read-only t))))
+  (let ((buff (gh-repo-tree--setup-repo-buffer repo)))
+    (if-let ((wnd (get-buffer-window buff)))
+        (select-window wnd)
+      (gh-repo-tree--window-with-other-window
+       (pop-to-buffer-same-window buff)))))
 
 (defalias 'gh-repo-run-github-explorer #'gh-repo-tree)
-
 
 (defun gh-repo--shuffle-words (words)
   "Shuffle WORDS into all possible comma-separated combinations.
