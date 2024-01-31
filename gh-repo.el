@@ -489,20 +489,64 @@ keys:
   :group 'gh-repo
   :type 'gh-repo-list-format)
 
+(defmacro gh-repo-tree--window-with-other-window (&rest body)
+  "Execute BODY in other window.
+If other window doesn't exists, split selected window right."
+  `(with-selected-window
+       (gh-repo--get-other-wind)
+     (progn ,@body)))
+
+(defvar-local gh-repo-list--items nil)
+(defvar-local gh-repo-list--columns nil)
+(defvar-local gh-repo-list--page 1)
+(defvar-local gh-repo-list--timer nil)
+(defvar-local gh-repo-list--total-count nil)
+(defvar-local gh-repo-list--text nil)
+(defvar-local gh-repo-list--query nil)
+(defvar-local gh-repo-list--stop nil)
+
+
+(defun gh-repo-query-to-option (key descr arg props)
+  "Convert GitHub repository query to option list.
+
+Argument KEY is a symbol representing the option key.
+
+Argument DESCR is a string describing the option.
+
+Argument ARG is a string representing the command-line argument.
+
+Arguments PROPS is a list of additional properties for the option."
+  (append (list key descr arg)
+          (append props
+                  (list :init-value (lambda (obj)
+                                      (let* ((alist
+                                              (and
+                                               gh-repo-list--query
+                                               (gh-repo-format-query-to-args
+                                                gh-repo-list--query)))
+                                             (value
+                                              (cadr (assoc-string
+                                                     arg alist))))
+                                        (setf
+                                         (slot-value obj 'value)
+                                         value)))))))
 (defun gh-repo-search-queries-to-options (queries)
-  "Convert GitHub code search QUERIES into command line options.
+  "Convert GitHub search QUERIES into command line options.
 
 Argument QUERIES is a list."
   (mapcan
    (pcase-lambda (`(,v . ,props))
      (let ((k (substring-no-properties v 0 1)))
-       (list (append (list (format "+%s" k) v
-                           (format "--%s=" v))
-                     props)
-             (append (list (format "-%s" k)
-                           (format "not %s" v)
-                           (format "--not-%s=" v))
-                     props))))
+       (list (append (gh-repo-query-to-option
+                      (format "+%s" k)
+                      v
+                      (format "--%s=" v)
+                      props))
+             (append (gh-repo-query-to-option
+                      (format "-%s" k)
+                      (format "not %s" v)
+                      (format "--not-%s=" v)
+                      props)))))
    queries))
 
 (require 'shell)
@@ -637,8 +681,10 @@ repository information in the minibuffer during selection.
 
 Each element of the alist is a list with the following structure: - The first
 item is either a symbol or a list of symbols that specifies the path to the
-value in the repository data structure. - The second item is a format string
-used to display the value, where \"%s\" will be replaced by the actual value. -
+value in the repository data structure.
+
+- The second item is a format string used to display the value, where \"%s\"
+will be replaced by the actual value. -
 The third item is an integer that specifies the width of the column in
 characters.
 
@@ -1329,6 +1375,39 @@ to the `ghub-get' function."
            (gh-repo--plist-omit '(:query)
                                 args))))
 
+(defun gh-repo--put (resource &optional params &rest args)
+  "Send a PUT request to a GitHub repository resource.
+
+Argument RESOURCE is a string representing the GitHub API resource to interact
+with.
+
+Optional argument PARAMS is an alist of parameters to send with the PUT request.
+
+Remaining arguments ARGS are additional arguments passed to the `ghub-put'
+function."
+  (let ((auth (gh-repo-authenticate)))
+    (apply #'ghub-put resource params
+           :auth (cdr auth)
+           :username (car auth)
+           args)))
+
+(defun gh-repo--delete (resource &optional params &rest args)
+  "Send a DELETE request to a GitHub repository resource.
+
+Argument RESOURCE is a string representing the GitHub API resource to interact
+with.
+
+Optional argument PARAMS is an alist of parameters to send with the DELETE
+request.
+
+Remaining arguments ARGS are additional arguments passed to the `ghub-delete'
+function."
+  (let ((auth (gh-repo-authenticate)))
+    (apply #'ghub-delete resource params
+           :auth (cdr auth)
+           :username (car auth)
+           args)))
+
 (defun gh-repo--ivy-read-repo (prompt url)
   "Read a repo in the minibuffer, with Ivy completion.
 
@@ -1694,7 +1773,6 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
           (apply fn args))))))
 
 (defvar gh-repo-repos-hash (make-hash-table :test #'equal))
-(defvar gh-repo-last-query nil)
 
 (defun gh-repo-search-repos (&optional initial-input query)
   "Search and interactively select GitHub repositories using a QUERY.
@@ -1703,7 +1781,6 @@ Optional argument QUERY is a string that specifies the search QUERY.
 
 Optional argument INITIAL-INPUT is a string to start search with."
   (interactive (list (gh-repo-get-search-query)))
-  (setq gh-repo-last-query query)
   (setq this-command 'gh-repo-search-repos)
   (let ((data (gh-repo-async-comp-read "Repo: " "/search/repositories"
                                        'gh-repo-search-repos
@@ -2018,6 +2095,24 @@ Argument ARGS is a list of strings, each representing a search argument."
    args
    ""))
 
+(defun gh-repo-format-query-to-args (query)
+  "Convert search QUERY to argument list.
+
+Argument QUERY is a string representing the search query to be formatted into
+command-line arguments."
+  (let ((result))
+    (with-temp-buffer
+      (insert query)
+      (while (re-search-backward "[+]-?\\([^:]+\\):\\([^+]+\\)" nil t 1)
+        (let ((arg (match-string-no-properties 1))
+              (value (match-string-no-properties 2)))
+          (setq arg (concat (if (looking-at "[+]-")
+                                "--not-"
+                              "--")
+                            arg "="))
+          (push (list arg value) result))))
+    result))
+
 (defun gh-repo-query-description ()
   "Formats a GitHub code search query based on specified arguments."
   (format "/search/repositories?q=%s"
@@ -2123,7 +2218,7 @@ page."
            (cons key value)))
         (t (cons (substring-no-properties arg (length "--")) t))))
 
-(defun gh-repo-post-request (payload)
+(defun gh-repo--post (payload)
   "Send a POST request with PAYLOAD to create a repository on GitHub."
   (let ((auth (gh-repo-authenticate)))
     (ghub-post "/user/repos" nil
@@ -2133,8 +2228,9 @@ page."
                :callback
                (lambda (value &rest _)
                  (if
-                     (yes-or-no-p (format "Clone repo %s?" (alist-get
-                                                            'full_name value)))
+                     (yes-or-no-p (format "Clone repo %s?"
+                                          (alist-get
+                                           'full_name value)))
                      (gh-repo-clone-repo (alist-get 'full_name value))
                    (message "Repository created."))))))
 
@@ -2150,7 +2246,7 @@ page."
              (new-cell (cons "name" name)))
         (setq obj (assoc-delete-all "name" obj))
         (setq obj (push new-cell obj))))
-    (gh-repo-post-request obj)))
+    (gh-repo--post obj)))
 
 (defun gh-repo-get-search-query ()
   "Generate a search query string from the current transient command arguments."
@@ -2295,9 +2391,10 @@ expected to be a key."
 
 (defvar gh-repo-list-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "+") #'gh-repo-list-next-page)
+    (define-key map (kbd "K") #'gh-repo-search-stop-loading)
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "p") #'previous-line)
-    (define-key map (kbd "G") #'previous-line)
     (set-keymap-parent map (make-composed-keymap button-buffer-map
                                                  special-mode-map))
     map))
@@ -2313,9 +2410,7 @@ keybindings for repository operations."
   (setq revert-buffer-function #'gh-repo-list-revert)
   (use-local-map gh-repo-list-mode-map))
 
-(defvar-local gh-repo-repos nil)
-(defvar-local gh-repo-query nil)
-(defvar-local gh-repo--list-columns nil)
+
 
 (defun gh-repo-list-render (cols value &rest props)
   "Display a GitHub repository's file structure.
@@ -2376,10 +2471,17 @@ of the repository list."
                                 #'gh-repo-tree-no-select)
                         "o"
                         (lambda (item)
-                          (when-let ((login (alist-get 'login (alist-get 'owner
-                                                               item))))
+                          (when-let ((login (alist-get 'login
+                                             (alist-get 'owner
+                                              item))))
                            (gh-repo-list-user-repos
-                            login)))))
+                            login)))
+                        "S" ,(apply-partially
+                              #'gh-repo-list-action
+                              #'gh-repo-star)
+                        "U" ,(apply-partially
+                              #'gh-repo-list-action
+                              #'gh-repo-unstar)))
             props))))
 
 (defun gh-repo-list-revert (&rest _)
@@ -2393,8 +2495,8 @@ of the repository list."
                               wnd)))
     (delete-region (point-min)
                    (point-max))
-    (gh-repo-list-render gh-repo--list-columns
-                         gh-repo-repos)
+    (gh-repo-list-render gh-repo-list--columns
+                         gh-repo-list--items)
     (when (and wnd
                (>= (point-max) pos))
       (set-window-point wnd pos)
@@ -2402,108 +2504,34 @@ of the repository list."
         (set-window-start wnd
                           saved-wind-start)))))
 
-(defun gh-repo--list-repos (url query cols &optional value-transformer)
-  "List GitHub repositories and render them interactively.
-
-Argument URL is the GitHub API endpoint to query.
-
-Argument QUERY is a string representing additional query parameters for the
-GitHub API request.
-
-Argument COLS is a list of column configurations for displaying repository data.
-
-Optional argument VALUE-TRANSFORMER is a function that transforms the data
-returned from the GitHub API before it is displayed."
-  (let* ((buff-name (concat "*gh-repo "
-                            url
-                            "*"))
-         (buff (get-buffer buff-name)))
-    (when (and buff
-               (not
-                (and (equal query
-                            (buffer-local-value 'gh-repo-query buff))
-                     (equal cols
-                            (buffer-local-value 'gh-repo--list-columns buff)))))
-      (when-let ((req-buff (buffer-local-value 'gh-repo-req-buffer buff)))
-        (let ((message-log-max nil))
-          (with-temp-message (or (current-message) "")
-            (kill-buffer req-buff)))
-        (kill-buffer buff)))
-    (setq buff (get-buffer-create buff-name))
-    (with-current-buffer buff
-      (unless (derived-mode-p 'gh-repo-list-mode)
-        (gh-repo-list-mode))
-      (setq gh-repo--list-columns cols)
-      (when (buffer-live-p gh-repo-req-buffer)
-        (let ((message-log-max nil))
-          (with-temp-message (or (current-message) "")
-            (kill-buffer gh-repo-req-buffer)
-            (setq gh-repo-repos nil)
-            (gh-repo-list-revert))))
-      (when (and (not (get-buffer-window buff)))
-        (pop-to-buffer-same-window buff))
-      (setq header-line-format "Loading")
-      (setq gh-repo-tree--loading t
-            gh-repo-tree--error-loading nil)
-      (gh-repo-tree--update-header-line)
-      (setq gh-repo-req-buffer
-            (gh-repo-get url nil
-                         :query query
-                         :errorback (lambda (_err _headers status _req)
-                                      (let ((err
-                                             (gh-repo-tree--get-status-error status)))
-                                        (when (buffer-live-p buff)
-                                          (with-current-buffer buff
-                                            (setq gh-repo-tree--loading nil
-                                                  gh-repo-tree--error-loading
-                                                  (or err
-                                                      "An error occured"))
-                                            (gh-repo-tree--update-header-line)))
-                                        (message (or err
-                                                     "An error occured"))))
-                         :callback
-                         (lambda (value _headers _status req)
-                           (when value-transformer
-                             (setq value (funcall value-transformer value)))
-                           (cond ((not (buffer-live-p buff))
-                                  nil)
-                                 ((not (bufferp (ghub-continue req)))
-                                  (with-current-buffer buff
-                                    (setq gh-repo-repos value
-                                          gh-repo-tree--loading nil
-                                          gh-repo-tree--error-loading nil)
-                                    (gh-repo-tree--update-header-line)
-                                    (gh-repo-list-revert)))
-                                 ((>= (length value)
-                                      (1- (length
-                                           (buffer-local-value 'gh-repo-repos buff))))
-                                  (with-current-buffer buff
-                                    (setq gh-repo-repos value
-                                          gh-repo-tree--loading t)
-                                    (when (get-buffer-window buff)
-                                      (gh-repo-list-revert))))
-                                 (t
-                                  (with-current-buffer buff
-                                    (setq gh-repo-repos value
-                                          gh-repo-tree--loading t)
-                                    (gh-repo-list-revert))))))))))
-
-;;;###autoload
-(defun gh-repo-list-user-repos (user)
-  "List USER repositories in a formatted table."
-  (interactive (list (gh-repo-github-user)))
-  (gh-repo-authenticate)
-  (gh-repo--list-repos (format "/users/%s/repos" user)
-                       `((per_page . ,gh-repo-default-repos-limit))
-                       gh-repo-list-user-repo-columns))
-
-;;;###autoload
-(defun gh-repo-list-repos ()
-  "List GitHub user repositories interactively."
+(defun gh-repo-search-stop-loading ()
+  "Stop the GitHub repository search loading process."
   (interactive)
-  (gh-repo-list-user-repos (car (gh-repo-authenticate))))
+  (setq gh-repo-list--stop t))
 
-(defvar gh-repo-search-current-term "")
+(defun gh-repo--display-buffer-other-window (buffer)
+  "Display BUFFER in another window, splitting if necessary.
+
+Argument BUFFER is the buffer to be displayed in another window."
+  (unless (get-buffer-window buffer)
+    (gh-repo-tree--window-with-other-window
+     (pop-to-buffer-same-window
+      buffer))))
+
+(defun gh-repo-list-next-page (&rest _)
+  "Increment the page number and request the next page of GitHub code search."
+  (interactive)
+  (cond ((and
+          (not gh-repo-tree--loading)
+          gh-repo-list--total-count
+          (> gh-repo-list--total-count
+             (length gh-repo-list--items)))
+         (setq gh-repo-tree--loading t)
+         (gh-repo--search-list-request gh-repo-list--text
+                                       gh-repo-list--query
+                                       (1+ gh-repo-list--page)))))
+
+
 
 ;;;###autoload
 (defun gh-repo-list-search (&optional text query)
@@ -2515,15 +2543,263 @@ repository.
 Optional argument QUERY is a string representing the additional search query."
   (interactive (list (read-string "Text: ")
                      (gh-repo-get-search-query)))
-  (setq gh-repo-last-query query)
   (gh-repo-authenticate)
-  (gh-repo--list-repos "search/repositories"
-                       (gh-repo-make-query text
-                                           query
-                                           nil
-                                           gh-repo-default-repos-limit)
-                       gh-repo-list-search-columns
-                       (apply-partially #'alist-get 'items)))
+  (gh-repo--search-list-request
+   text
+   query
+   1
+   gh-repo-default-repos-limit))
+
+(defun gh-repo--search-list-request (text query &optional page per-page)
+  "Fetch and display a GitHub repository's file structure.
+
+Argument TEXT is a string representing the text to search for in the repository.
+
+Argument QUERY is a string representing the additional search query.
+
+Optional argument PAGE is an integer representing the page number of the search
+results.
+
+Optional argument PER-PAGE is an integer representing the number of results per
+page."
+  (unless page (setq page 1))
+  (let ((buff-name (concat "*gh-repo " "search/repositories" "*")))
+    (cond ((when-let ((buff (get-buffer buff-name)))
+             (and
+              (= page (buffer-local-value 'gh-repo-list--page buff))
+              (equal (buffer-local-value 'gh-repo-list--text buff) text)
+              (equal (buffer-local-value 'gh-repo-list--query buff) query)
+              (not (buffer-local-value 'gh-repo-tree--error-loading buff))))
+           (message "gh-repo: already loading"))
+          (t
+           (with-current-buffer (get-buffer-create buff-name)
+             (unless (derived-mode-p 'gh-repo-list-mode)
+               (gh-repo-list-mode))
+             (when (= page 1)
+               (let ((inhibit-read-only t))
+                 (erase-buffer)
+                 (setq gh-repo-list--items nil)
+                 (setq gh-repo-list--total-count nil)))
+             (setq gh-repo-list--text text
+                   gh-repo-list--query query)
+             (setq gh-repo-list--columns gh-repo-list-search-columns)
+             (setq gh-repo-tree--loading t
+                   gh-repo-tree--error-loading nil
+                   gh-repo-list--page page)
+             (gh-repo-list--update-header-line)
+             (when (= page 1)
+               (gh-repo--display-buffer-other-window (current-buffer))))
+           (gh-repo-get "search/repositories" nil
+                        :query
+                        (gh-repo-make-query text query page
+                                            (or per-page
+                                                gh-repo-default-repos-limit))
+                        :errorback (lambda (_err _headers status _req)
+                                     (let ((err
+                                            (gh-repo-tree--get-status-error
+                                             status)))
+                                       (when (buffer-live-p (get-buffer
+                                                             buff-name))
+                                         (with-current-buffer (get-buffer
+                                                               buff-name)
+                                           (setq gh-repo-tree--loading nil
+                                                 gh-repo-tree--error-loading
+                                                 (or err
+                                                     "An error occured")
+                                                 gh-repo-list--page
+                                                 (max 1
+                                                      (1- gh-repo-list--page)))
+                                           (when gh-repo-list--stop
+                                             (setq gh-repo-list--stop nil))
+                                           (gh-repo-list--update-header-line)))
+                                       (message (or err
+                                                    "An error occured"))))
+                        :callback
+                        (lambda (response _headers _status _req)
+                          (let ((value (alist-get 'items response))
+                                (total (alist-get 'total_count response))
+                                (buff (get-buffer buff-name)))
+                            (cond ((or (not (buffer-live-p buff))
+                                       (not
+                                        (and (equal text (buffer-local-value
+                                                          'gh-repo-list--text
+                                                          buff))
+                                             (equal query (buffer-local-value
+                                                           'gh-repo-list--query
+                                                           buff)))))
+                                   nil)
+                                  (t
+                                   (with-current-buffer buff
+                                     (setq gh-repo-list--page page
+                                           gh-repo-list--total-count
+                                           (or gh-repo-list--total-count
+                                               total))
+                                     (setq gh-repo-list--items (nconc gh-repo-list--items value)
+                                           gh-repo-list--columns gh-repo-list-search-columns)
+                                     (setq gh-repo-tree--loading (and (not gh-repo-list--stop)
+                                                                      (> total (length gh-repo-list--items))))
+                                     (gh-repo-list--update-header-line)
+                                     (gh-repo-list-revert)
+                                     (when gh-repo-list--stop
+                                       (setq gh-repo-list--stop nil))
+                                     (when gh-repo-tree--loading
+                                       (gh-repo-debounce
+                                        'gh-repo-list--timer
+                                        2
+                                        #'gh-repo--search-list-request
+                                        text
+                                        query
+                                        (1+ (or page 1))
+                                        (or per-page
+                                            gh-repo-default-repos-limit)))))))))))))
+
+
+
+(defun gh-repo--list-repos (url page cols &optional value-transformer)
+  "List GitHub repositories and render them interactively.
+
+Argument URL is the GitHub API endpoint to query.
+
+Argument PAGE is an integer representing the page number of the search results.
+
+Argument COLS is a list of column configurations for displaying repository data.
+
+Optional argument VALUE-TRANSFORMER is a function that transforms the data
+returned from the GitHub API before it is displayed."
+  (unless page (setq page 1))
+  (let* ((buff-name (concat "*gh-repo "
+                            url
+                            "*"))
+         (buff (get-buffer-create buff-name)))
+    (with-current-buffer buff
+      (unless (derived-mode-p 'gh-repo-list-mode)
+        (gh-repo-list-mode))
+      (when (= page 1)
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (setq gh-repo-list--items nil)
+          (setq gh-repo-list--total-count nil)))
+      (setq gh-repo-list--columns cols)
+      (setq gh-repo-tree--loading t
+            gh-repo-tree--error-loading nil
+            gh-repo-list--total-count nil
+            gh-repo-list--page page)
+      (gh-repo-list--update-header-line)
+      (when (= page 1)
+        (gh-repo--display-buffer-other-window (current-buffer))))
+    (gh-repo-get url nil
+                 :query `((page . ,page)
+                          (per_page . ,gh-repo-default-repos-limit))
+                 :errorback (lambda (_err _headers status _req)
+                              (let ((err
+                                     (gh-repo-tree--get-status-error
+                                      status)))
+                                (when (buffer-live-p buff)
+                                  (with-current-buffer buff
+                                    (when gh-repo-list--stop
+                                      (setq gh-repo-list--stop nil))
+                                    (setq gh-repo-tree--loading nil
+                                          gh-repo-list--page (max 1
+                                                                  (1- gh-repo-list--page))
+                                          gh-repo-tree--error-loading
+                                          (or err
+                                              "An error occured"))
+                                    (gh-repo-list--update-header-line)))
+                                (message (or err
+                                             "An error occured"))))
+                 :callback
+                 (lambda (value _headers _status _req)
+                   (when (buffer-live-p buff)
+                     (when value-transformer
+                       (setq value (funcall value-transformer value)))
+                     (with-current-buffer buff
+                       (setq gh-repo-list--page page
+                             gh-repo-list--total-count
+                             nil)
+                       (setq gh-repo-list--items (nconc gh-repo-list--items value)
+                             gh-repo-list--columns cols)
+                       (setq gh-repo-tree--loading (and
+                                                    value
+                                                    (not gh-repo-list--stop)
+                                                    (= gh-repo-default-repos-limit
+                                                       (length value))))
+                       (gh-repo-list--update-header-line)
+                       (gh-repo-list-revert)
+                       (when gh-repo-list--stop
+                         (setq gh-repo-list--stop nil))
+                       (when gh-repo-tree--loading
+                         (gh-repo-debounce
+                          'gh-repo-list--timer
+                          1
+                          #'gh-repo--list-repos
+                          url
+                          (1+ (or page 1))
+                          cols
+                          value-transformer))))))))
+
+;;;###autoload
+(defun gh-repo-list-user-repos (user)
+  "List USER repositories in a formatted table."
+  (interactive (list (gh-repo-github-user)))
+  (gh-repo-authenticate)
+  (gh-repo--list-repos (format "/users/%s/repos" user)
+                       1
+                       gh-repo-list-user-repo-columns))
+
+;;;###autoload
+(defun gh-repo-list-repos ()
+  "List GitHub user repositories interactively."
+  (interactive)
+  (gh-repo-authenticate)
+  (gh-repo--list-repos "/user/repos"
+                       1
+                       gh-repo-list-user-repo-columns))
+
+;;;###autoload
+(defun gh-repo-list-starred-repos ()
+  "List starred GitHub user repositories interactively."
+  (interactive)
+  (gh-repo-authenticate)
+  (gh-repo--list-repos "/user/starred"
+                       1
+                       gh-repo-list-user-repo-columns))
+
+(defun gh-repo-unstar (owner/repo)
+  "Unstar a GitHub repository specified by OWNER/REPO."
+  (interactive (list (or (gh-repo-tree--current-buffer-repo)
+                         (gh-repo-search-repos)
+                         (read-string "User and repository (user/repo): "))))
+  (gh-repo--delete (concat "/user/starred/" owner/repo)
+                   nil
+                   :errorback (lambda (_err _headers status _req)
+                                (let* ((prompt (format "Couldn't unstar %s: "
+                                                       owner/repo))
+                                       (err
+                                        (concat prompt " " (or (gh-repo-tree--get-status-error
+                                                                status)
+                                                               ""))))
+                                  (message err)))
+                   :callback (lambda (&rest _args)
+                               (message "Unstarred %s" owner/repo))))
+
+(defun gh-repo-star (owner/repo)
+  "Star a GitHub repository specified by OWNER/REPO.
+
+Argument OWNER/REPO is a string in the format \"user/repo\"."
+  (interactive (list (or (gh-repo-tree--current-buffer-repo)
+                         (gh-repo-search-repos)
+                         (read-string "User and repository (user/repo): "))))
+  (gh-repo--put (concat "/user/starred/" owner/repo) nil
+                :errorback (lambda (_err _headers status _req)
+                             (let* ((prompt (format "Couldn't star %s: "
+                                                    owner/repo))
+                                    (err
+                                     (concat prompt " " (or (gh-repo-tree--get-status-error
+                                                             status)
+                                                            ""))))
+                               (message err)))
+                :callback (lambda (&rest _args)
+                            (message "Starred %s" owner/repo))))
 
 (defun gh-repo-list-map-getter (getter)
   "Create a GETTER function for accessing repository data.
@@ -2550,57 +2826,75 @@ extract data from a repository object."
   :value
   (lambda ()
     gh-repo-default-arguments)
-  ["New repository arguments"
-   ("n" "name" "--name=" :unsavable t)
-   ("d" "description" "--description="
-    :class transient-option
-    :unsavable t)
-   ("p" "private" "--private"
-    :unsavable t)
-   ("l" "license_template" "--license_template="
-    :class transient-option
-    :choices (lambda (&rest _)
-               (unless gh-repo-licences
-                 (setq gh-repo-licences (gh-repo-load-licences)))
-               (mapcar (apply-partially #'alist-get 'key) gh-repo-licences)))
-   ("g" "gitignore_template" "--gitignore_template="
-    :class transient-option
-    :choices (lambda (&rest _)
-               (unless gh-repo-gitignore-templates
-                 (setq gh-repo-gitignore-templates
-                       (append
-                        (gh-repo-load-gitignore-templates) nil)))
-               gh-repo-gitignore-templates))
-   ("t" "template repository" "--is_template")
-   ("i" "has_issues" "--has_issues")
-   ("P" "projects" "--has_projects")
-   ("w" "wiki" "--has_wiki")
-   ("L" "downloads" "--has_downloads")
-   ("S" "discussions" "--has_discussions")]
-  ["Config"
-   ("u" gh-repo-change-user
-    :description (lambda ()
-                   (concat  "Github User: "
-                            (if
-                                (or (not (car-safe gh-repo--cached-auth-data))
-                                    (string-empty-p (car
-                                                     gh-repo--cached-auth-data))
-                                    (not (cdr-safe gh-repo--cached-auth-data)))
-                                "(not logged)"
-                              (propertize
-                               (substring-no-properties
-                                (or (car-safe
-                                     gh-repo--cached-auth-data)
-                                    ""))
-                               'face 'transient-value)))))]
-  ["Actions"
-   ("s" "Search repos" gh-repo-search-menu)
-   ("i" "list my repos" gh-repo-list-repos)
-   ("r" "list other user repos" gh-repo-list-user-repos)
-   ("o" "Clone other user repo" gh-repo-clone-other-user-repo)
-   ("c" "Clone my repo" gh-repo-clone-repo)
-   ("R" "Remove my repo" gh-repo-delete)
-   ("RET" "Create repo" gh-repo-create-repo)]
+  [["New repository arguments"
+    ("n" "name" "--name=" :unsavable t)
+    ("d" "description" "--description="
+     :class transient-option
+     :unsavable t)
+    ("p" "private" "--private"
+     :unsavable t)
+    ("t" "license_template" "--license_template="
+     :class transient-option
+     :choices (lambda (&rest _)
+                (unless gh-repo-licences
+                  (setq gh-repo-licences (gh-repo-load-licences)))
+                (mapcar (apply-partially #'alist-get 'key) gh-repo-licences)))
+    ("g" "gitignore_template" "--gitignore_template="
+     :class transient-option
+     :choices (lambda (&rest _)
+                (unless gh-repo-gitignore-templates
+                  (setq gh-repo-gitignore-templates
+                        (append
+                         (gh-repo-load-gitignore-templates) nil)))
+                gh-repo-gitignore-templates))
+    ("T" "template repository" "--is_template")
+    ("i" "has_issues" "--has_issues")
+    ("P" "projects" "--has_projects")
+    ("w" "wiki" "--has_wiki")
+    ("L" "downloads" "--has_downloads")
+    ("a" "auto readme" "--auto_init")
+    ("S" "discussions" "--has_discussions")]
+   ["List"
+    ("l l" "list my repos" gh-repo-list-repos)
+    ("l s" "list starred repos" gh-repo-list-starred-repos)
+    ("l o" "list other user repos" gh-repo-list-user-repos)
+    "Actions"
+    ("s" "Search repos" gh-repo-search-menu)
+    ("o" "Clone other user repo" gh-repo-clone-other-user-repo)
+    ("c" "Clone my repo" gh-repo-clone-repo)
+    ("R" "Remove my repo" gh-repo-delete)]
+   ["Config"
+    ("u" gh-repo-change-user
+     :description (lambda ()
+                    (concat  "Github User: "
+                             (if
+                                 (or (not (car-safe gh-repo--cached-auth-data))
+                                     (string-empty-p (car
+                                                      gh-repo--cached-auth-data))
+                                     (not (cdr-safe gh-repo--cached-auth-data)))
+                                 "(not logged)"
+                               (propertize
+                                (substring-no-properties
+                                 (or (car-safe
+                                      gh-repo--cached-auth-data)
+                                     ""))
+                                'face 'transient-value)))))]]
+  [["Create"
+    ("RET"  gh-repo-create-repo
+     :description
+     (lambda ()
+       (let* ((arg "--name=")
+              (name (seq-find
+                     (apply-partially #'string-prefix-p arg)
+                     (gh-repo-get-arguments))))
+         (if name
+             (concat "Create repo "
+                     (propertize (substring-no-properties
+                                  name
+                                  (length
+                                   arg))
+                                 'face 'transient-value))
+           (propertize "Create repo " 'face 'transient-inapt-suffix)))))]]
   (interactive)
   (gh-repo-authenticate)
   (transient-setup #'gh-repo-menu))
@@ -3041,12 +3335,6 @@ error details."
               wind)))))
     wind-target))
 
-(defmacro gh-repo-tree--window-with-other-window (&rest body)
-  "Execute BODY in other window.
-If other window doesn't exists, split selected window right."
-  `(with-selected-window
-       (gh-repo--get-other-wind)
-     (progn ,@body)))
 
 (defun gh-repo-tree--fetch-repo-tree (repo &optional callback on-error)
   "Fetch GitHub REPO's file structure as a tree.
@@ -3348,7 +3636,10 @@ Optional argument PARENT is a string representing the parent directory path."
     (define-key map (kbd "<tab>") #'gh-repo-tree-toggle-row)
     (define-key map (kbd "r") #'gh-repo-tree-browse-repo)
     (define-key map (kbd "-") #'gh-repo-tree-toggle-row)
-    (define-key map (kbd "F") #'gh-repo-tree-clone-repo)
+    (define-key map (kbd "C") #'gh-repo-tree-clone-repo)
+    (define-key map (kbd "S") #'gh-repo-star)
+    (define-key map (kbd "U") #'gh-repo-unstar)
+    (define-key map (kbd "f") #'gh-repo-tree-find-other-file)
     (define-key map (kbd ".") #'gh-repo-tree-act-on-repo)
     (define-key map (kbd "C-j") #'gh-repo-tree--view-file-no-select)
     (define-key map (kbd "RET") #'gh-repo-tree--visit-or-expand)
@@ -3404,26 +3695,58 @@ Argument REPO is a string representing the GitHub repository to browse."
 
 (defvar-local gh-repo-tree--old-header-line nil)
 
+(defconst gh-repo--loading-label (propertize "Loading" 'face 'warning))
+(defconst gh-repo--error-label (propertize "Error" 'face 'error))
+(defconst gh-repo--ready-label (propertize "Ready" 'face 'success))
+
+(defun gh-repo--get-status-line ()
+  "Generate a status line based on the repository's loading state."
+  (cond (gh-repo-tree--loading
+         gh-repo--loading-label)
+        ((stringp gh-repo-tree--error-loading)
+         (concat gh-repo--error-label
+                 " "
+                 (truncate-string-to-width
+                  (string-join
+                   (split-string
+                    gh-repo-tree--error-loading
+                    nil t)
+                   " ")
+                  70 nil nil t)))
+        (gh-repo-tree--error-loading
+         gh-repo--error-label)
+        (t gh-repo--ready-label)))
+
+(defun gh-repo--get-page-indicator ()
+  "Display a formatted page indicator with current page and total repositories."
+  (when gh-repo-list--total-count
+    (propertize (format (concat " Page %s (%s/%s) ")
+                        (or gh-repo-list--page 1)
+                        (length gh-repo-list--items)
+                        gh-repo-list--total-count)
+                'face
+                'font-lock-number-face)))
+
 (defun gh-repo-tree--update-header-line ()
-  "Update header line with GitHub code search info.
+  "Update header line for Github repository tree viewing.
 
 Optional argument HIDDEN-COUNT is an integer representing the number of search
 results that are not displayed."
   (setq header-line-format
         (list (concat (propertize " " 'display '(space :align-to 0))
                       (format "%s " (buffer-name)))
-              '(:eval (if gh-repo-tree--loading
-                          (propertize " Loading" 'face 'warning)
-                        (if gh-repo-tree--error-loading
-                            (propertize (string-join
-                                         (split-string
-                                          (format " Error: %s"
-                                           gh-repo-tree--error-loading)
-                                          nil t)
-                                         " ")
-                             'face
-                             'error)
-                          (propertize " Ready" 'face 'success)))))))
+              (gh-repo--get-status-line))))
+
+(defun gh-repo-list--update-header-line ()
+  "Update header line with GitHub code list info.
+
+Optional argument HIDDEN-COUNT is an integer representing the number of search
+results that are not displayed."
+  (setq header-line-format
+        (list (concat (propertize " " 'display '(space :align-to 0))
+                      (format "%s " (buffer-name)))
+              (concat (gh-repo--get-status-line)
+                      (gh-repo--get-page-indicator)))))
 
 (defvar-local gh-repo-tree--request-buffer nil)
 
@@ -3599,7 +3922,6 @@ structure."
   (unless gh-repo-tree--old-header-line
     (setq gh-repo-tree--old-header-line header-line-format))
   (gh-repo-tree--update-header-line)
-  (setq-local revert-buffer-function #'gh-repo-tree--revert)
   (use-local-map gh-repo-tree-mode-map))
 
 (put 'gh-repo-tree-mode 'mode-class 'special)
@@ -3666,22 +3988,40 @@ Argument WORDS is a list of strings to be shuffled."
     (delete nil combo-list)))
 
 (transient-define-argument gh-repo-search-term-argument ()
-  "Read description and assign it in the variable `gh-repo-search-current-term'."
+  "Read description and assign it in the variable `gh-repo-list--text'."
   :description "?q="
   :class 'transient-lisp-variable
   :always-read t
+  :set-value 'set-local
   :reader #'read-string
   :argument ""
-  :variable 'gh-repo-search-current-term)
+  :variable 'gh-repo-list--text)
 
 
+(transient-define-suffix gh-repo-echo-arguments (arguments)
+  "Show the transient's active ARGUMENTS in the echo area.
+Intended for use in prefixes used for demonstration purposes,
+such as when suggesting a new feature or reporting an issue."
+  :transient t
+  :description "Echo arguments"
+  :key "x"
+  (interactive (list (transient-args transient-current-command)))
+  (print arguments)
+  (message "%s: %s"
+           (key-description (this-command-keys))
+           (mapconcat (lambda (arg)
+                        (propertize (if (string-match-p " " arg)
+                                        (format "%S" arg)
+                                      arg)
+                                    'face 'transient-argument))
+                      arguments " ")))
 
 ;;;###autoload (autoload 'gh-repo-search-menu "gh-repo" nil t)
 (transient-define-prefix gh-repo-search-menu ()
   "Command dispatcher for GitHub search queries."
   [:description (lambda ()
                   (format "/search/repositories?q=%s%s"
-                          (or gh-repo-search-current-term "")
+                          (or gh-repo-list--text "")
                           (gh-repo-format-args-to-query
                            (gh-repo-get-args-for-query))))
    :setup-children
@@ -3715,25 +4055,26 @@ Argument WORDS is a list of strings to be shuffled."
                         (interactive)
                         (funcall fn
                                  (gh-repo-search-repos
-                                  gh-repo-search-current-term
+                                  gh-repo-list--text
                                   (gh-repo-get-search-query))))))
               gh-repo-actions)))]
   ["Search and show results in"
-   ("C-c C-a" transient-echo-arguments)
-   ("l" "List" (lambda ()
-                 (interactive)
-                 (setq gh-repo-search-current-term (if (or (not gh-repo-search-current-term)
-                                                           (string-empty-p gh-repo-search-current-term))
-                                                       (read-string "Search for: ")
-                                                     gh-repo-search-current-term))
-                 (gh-repo-list-search gh-repo-search-current-term
-                                      (gh-repo-get-search-query))))
-   ("RET" "In minibuffer" (lambda ()
-                            (interactive)
-                            (gh-repo-prompt-repo-action
-                             (gh-repo-search-repos
-                              gh-repo-search-current-term
-                              (gh-repo-get-search-query)))))]
+   ("C-c C-a" gh-repo-echo-arguments)
+   ("RET" "List" (lambda ()
+                   (interactive)
+                   (setq gh-repo-list--text
+                         (if (or (not gh-repo-list--text)
+                                 (string-empty-p gh-repo-list--text))
+                             (read-string "Search for: ")
+                           gh-repo-list--text))
+                   (gh-repo-list-search gh-repo-list--text
+                                        (gh-repo-get-search-query))))
+   ("s" "In minibuffer" (lambda ()
+                          (interactive)
+                          (gh-repo-prompt-repo-action
+                           (gh-repo-search-repos
+                            gh-repo-list--text
+                            (gh-repo-get-search-query)))))]
   (interactive)
   (gh-repo-authenticate)
   (transient-setup #'gh-repo-search-menu))
