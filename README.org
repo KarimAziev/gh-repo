@@ -2,10 +2,23 @@
 
 * About
 
-Create and manage Github repositories.
 
-[[./gh-repo-demo.png]]
+This library provides interactive Emacs commands for interacting with GitHub
+repositories using the GitHub API.
 
+*Key features*:
+
+- Creating new repositories
+- Viewing repositories as a rich tree structure
+- Viewing repositories files
+- Listing user repositories
+- Cloning repositories
+- Deleting repositories
+- Viewing repositories as a rich tree structure
+- Searching for repositories with advanced filtering
+- A transient menu is available to access all the key features.
+
+  [[./gh-repo.gif]]
 
 
 * Table of Contents                                       :TOC_2_gh:QUOTE:
@@ -72,19 +85,17 @@ For example, if your github username is =YOUR_GITHUB_USERNAME= is should be:
 
 Next, add an entry to your =auth-sources=:
 
-#+begin_src plaintext
+#+begin_example
 machine api.github.com login YOUR-GITHUB-USERNAME^gh-repo password YOUR-GITHUB-TOKEN
-#+end_src
+#+end_example
 
 You can add this entry to your =~/.authinfo.gpg= file (recommended for secure, encrypted storage) or =~/.authinfo= (see variable =auth-sources=).
 ** Usage
-~M-x gh-repo-menu~
-This is a command dispatcher for GitHub repositories:
-*** ~gh-repo-create-repo~  (args)
-Create a new repository from transient arguments =args=.
-*** ~gh-repo-clone-other-user-repo~  (name)
-Clone other user's =name= repository.
-*** ~gh-repo-delete~  (fullname)
-Remove a repository request with the given =fullname=.
-*** ~gh-repo-clone-repo~  (name)
-Read target directory from minibuffer and clone repository =name=.
+
+This library offers several interactive commands to work with GitHub
+repositories.
+
+A transient menu is available to access all the key features.
+To open the transient menu, type:
+
+=M-x gh-repo-menu=

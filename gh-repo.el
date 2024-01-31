@@ -26,7 +26,41 @@
 
 ;;; Commentary:
 
-;; Create and manage gh repositories.
+;; This library provides interactive Emacs commands for interacting with GitHub
+;; repositories using the GitHub API. Users can create, list, and manage GitHub
+;; repositories directly from Emacs.
+
+;;; Installation:
+
+;; To install, simply add `gh-repo.el' to your load-path, require the package, and
+;; configure your GitHub authentication.
+
+;; Example configuration:
+;; (require 'gh-repo)
+;; (setq gh-repo-ghub-auth-info '("YOUR_GITHUB_USERNAME" . gh-repo))
+
+;;; Usage:
+
+;; This library offers several interactive commands to work with GitHub
+;; repositories. A transient menu is available to access all the key features.
+;; To open the transient menu, use:
+
+;; `M-x gh-repo-menu';
+
+;; Key features include:
+
+;; - Creating new repositories
+;; - Viewing repositories as a rich tree structure
+;; - Listing user repositories
+;; - Cloning repositories
+;; - Starring/unstarring repositories
+;; - Deleting repositories
+;; - Searching for repositories with advanced filtering
+
+;; Functions like gh-repo-clone-repo, gh-repo-delete, and gh-repo-list-repos
+;; provide quick access to the most common tasks, while the transient menu
+;; offers an organized interface for all features.
+
 
 ;;; Code:
 
