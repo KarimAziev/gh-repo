@@ -78,8 +78,11 @@
 (require 'project)
 (require 'ghub)
 
-(defvar gh-repo--search-langs-alist nil)
-(defvar gh-repo--search-langs nil)
+
+(defvar gh-repo-languages nil)
+(defvar gh-repo-licences nil)
+(defvar gh-repo-gitignore-templates nil)
+
 (defvar gh-repo--cached-auth-data nil)
 (defvar gh-repo-special-color-column (color-darken-name
                                       (frame-parameter
@@ -104,16 +107,7 @@
                                            "name,topics,readme,decription")
                                           :class transient-option)
                                          ("language"
-                                          :choices
-                                          (lambda ()
-                                            (setq gh-repo--search-langs-alist (or
-                                                                               gh-repo--search-langs-alist
-                                                                               (gh-repo--init-languages)))
-                                            (setq gh-repo--search-langs (or
-                                                                         gh-repo--search-langs
-                                                                         (mapcan #'cdr
-                                                                          (copy-tree
-                                                                           gh-repo--search-langs-alist)))))
+                                          :choices gh-repo--language-choices
                                           :class transient-option)
                                          ("user"
                                           :reader gh-repo-github-user
@@ -523,6 +517,21 @@ keys:
   :group 'gh-repo
   :type 'gh-repo-list-format)
 
+(defcustom gh-repo-cache-dir (locate-user-emacs-file "var/gh-repo/")
+  "The directory used to cache GitHub repository data.
+
+The value can be set to nil to disable caching, or to a specific directory path
+where the cache files should be stored.
+
+To change the cache directory, set this variable to the desired directory path
+as a string."
+  :group 'gh-repo
+  :type '(choice
+          (item
+           :tag "Don't store cache"
+           :value nil)
+          (directory)))
+
 (defmacro gh-repo-tree--window-with-other-window (&rest body)
   "Execute BODY in other window.
 If other window doesn't exists, split selected window right."
@@ -585,7 +594,6 @@ Argument QUERIES is a list."
 
 (require 'shell)
 (require 'comint)
-(require 'request)
 (require 'auth-source)
 (require 'transient)
 
@@ -740,22 +748,21 @@ specified in the alist when selecting a repository."
                         (integer :tag "Column Width" 20)
                         (const :tag "None" nil)))))
 
+(defvar gh-repo-util-host-regexp
+  (concat "\\("
+          "\\(\\(github\\|gitlab\\|gitlab\\.[a-z]+\\)\\.com\\)"
+          "\\|"
+          "\\(\\(bitbucket\\|salsa[\\.]debian\\|framagit\\|codeberg\\|git[\\.]savannah[\\.]gnu\\|git[\\.]kernel\\|git[\\.]suckless\\|code[\\.]orgmode\\|gitlab[\\.]gnome\\)[\\.]org\\)"
+          "\\|"
+          "\\(\\(repo[\\.]or\\)[\\.]cz\\)"
+          "\\|"
+          "\\(git\\.sr\\.ht\\)"
+          "\\)")
+  "Regexp matching common git hosts.")
+
 (defvar-local gh-repo-tree--loading nil)
 (defvar-local gh-repo-tree--error-loading nil)
 
-(defun gh-repo--download-url (url)
-  "Download URL and return string."
-  (let ((download-buffer (url-retrieve-synchronously url)))
-    (prog1
-        (with-current-buffer download-buffer
-          (set-buffer download-buffer)
-          (goto-char (point-min))
-          (re-search-forward "^$" nil 'move)
-          (forward-char)
-          (delete-region (point-min)
-                         (point))
-          (buffer-string))
-      (kill-buffer download-buffer))))
 
 (defun gh-repo--json-parse-string (str &optional object-type array-type
                                        null-object false-object)
@@ -796,30 +803,95 @@ represent a JSON false value.  It defaults to `:false'."
           (json-false (or false-object :false)))
       (json-read-from-string str))))
 
-(defun gh-repo--init-languages ()
-  "Fetch github languages and stotre them to `gh-repo--search-langs-alist'."
-  (setq gh-repo--search-langs-alist
-        (mapcar
-         (lambda (it)
-           (let-alist it
-             (cons .name .aliases)))
-         (gh-repo--json-parse-string
-          (gh-repo--download-url
-           "https://api.github.com/languages")
-          'alist
-          'list))))
+(defun gh-repo--serialize (data filename)
+  "Serialize DATA to FILENAME.
 
-(defvar gh-repo-util-host-regexp
-  (concat "\\("
-          "\\(\\(github\\|gitlab\\|gitlab\\.[a-z]+\\)\\.com\\)"
-          "\\|"
-          "\\(\\(bitbucket\\|salsa[\\.]debian\\|framagit\\|codeberg\\|git[\\.]savannah[\\.]gnu\\|git[\\.]kernel\\|git[\\.]suckless\\|code[\\.]orgmode\\|gitlab[\\.]gnome\\)[\\.]org\\)"
-          "\\|"
-          "\\(\\(repo[\\.]or\\)[\\.]cz\\)"
-          "\\|"
-          "\\(git\\.sr\\.ht\\)"
-          "\\)")
-  "Regexp matching common git hosts.")
+The saved data can be restored with `elisp-eval-unserialize'."
+  (when (file-writable-p filename)
+    (with-temp-file filename
+      (insert
+       (let (print-level print-length print-circle)
+         (prin1-to-string data))))))
+
+(defun gh-repo--unserialize (filename)
+  "Read data serialized by `gh-repo--serialize' from FILENAME."
+  (with-demoted-errors
+      "Error during file deserialization: %S"
+    (when (file-exists-p filename)
+      (with-temp-buffer
+        (insert-file-contents filename)
+        (read (buffer-string))))))
+
+(defun gh-repo--download-json-sync (url)
+  "Download URL and return string."
+  (let ((download-buffer (url-retrieve-synchronously url)))
+    (prog1
+        (with-current-buffer download-buffer
+          (set-buffer download-buffer)
+          (goto-char (point-min))
+          (re-search-forward "^$" nil 'move)
+          (forward-char)
+          (delete-region (point-min)
+                         (point))
+          (gh-repo--json-parse-string
+           (buffer-string)
+           'alist 'list))
+      (kill-buffer download-buffer))))
+
+(defun gh-repo--init-variable (variable fetcher &rest args)
+  "Initialize or fetch cached VARIABLE value.
+
+Argument VARIABLE is a symbol representing the variable to initialize.
+
+Argument FETCHER is a function that is called to fetch the value when VARIABLE
+is not already set.
+
+Remaining arguments ARGS are passed to the FETCHER function when calling it to
+obtain the value for VARIABLE."
+  (or (symbol-value variable)
+      (let* ((file (and gh-repo-cache-dir
+                        (expand-file-name (symbol-name variable)
+                                          gh-repo-cache-dir)))
+             (value
+              (when (and gh-repo-cache-dir
+                         (file-exists-p file))
+                (gh-repo--unserialize file))))
+        (if value
+            (set variable value)
+          (setq value (apply fetcher args))
+          (set variable value)
+          (when (and value file)
+            (let ((dir (file-name-directory file)))
+              (unless (file-exists-p dir)
+                (make-directory dir 'parents))
+              (gh-repo--serialize value file)))
+          value))))
+
+(defun gh-repo--language-choices ()
+  "Fetch and return a list of programming languages."
+  (gh-repo--init-variable 'gh-repo-languages
+                          #'gh-repo--fetch-langs))
+
+(defun gh-repo--fetch-langs ()
+  "Fetch language aliases from GitHub's API."
+  (mapcan
+   (lambda (it)
+     (cdr (assq 'aliases it)))
+   (gh-repo--download-json-sync
+    "https://api.github.com/languages")))
+
+(defun gh-repo--license-choices ()
+  "Fetch and return GitHub license keys."
+  (gh-repo--init-variable 'gh-repo-licences #'gh-repo--download-json-sync
+                          "https://api.github.com/licenses")
+  (mapcar (apply-partially #'alist-get 'key) gh-repo-licences))
+
+(defun gh-repo--gitignore-template-choices ()
+  "Fetch gitignore template choices from GitHub API."
+  (gh-repo--init-variable 'gh-repo-gitignore-templates
+                          #'gh-repo--download-json-sync
+                          "https://api.github.com/gitignore/templates"))
+
 
 (defvar gh-repo-minibuffer-map
   (let ((map (make-sparse-keymap)))
@@ -1289,42 +1361,6 @@ The default value is nil."
                                    "Saved by gh-repo")
         (setq gh-repo-ghub-auth-info cell))
       gh-repo-ghub-auth-info)))
-
-(defun gh-repo-load-licences ()
-  "Return list of available licences from github api."
-  (let ((response (request "https://api.github.com/licenses"
-                    :type "GET"
-                    :headers
-                    `(("accept" . "application/json")
-                      ("User-Agent" . "Emacs Restclient")
-                      ("content-type" . "application/json"))
-                    :sync t
-                    :parser 'json-read)))
-    (let ((status-code (request-response-status-code response)))
-      (cond ((not status-code)
-             (user-error "Request failed: Could not reach the server"))
-            ((= status-code 200)
-             (request-response-data response))
-            (t
-             (error "Request failed"))))))
-
-(defun gh-repo-load-gitignore-templates ()
-  "Fetch list of .gitignore templates from GitHub API."
-  (let ((response (request "https://api.github.com/gitignore/templates"
-                    :type "GET"
-                    :headers
-                    `(("accept" . "application/json")
-                      ("User-Agent" . "Emacs Restclient")
-                      ("content-type" . "application/json"))
-                    :sync t
-                    :parser 'json-read)))
-    (let ((status-code (request-response-status-code response)))
-      (cond ((not status-code)
-             (user-error "Request failed: Could not reach the server"))
-            ((= status-code 200)
-             (request-response-data response))
-            (t
-             (error "Request failed"))))))
 
 (defun gh-repo-values-to-columns (spec data)
   "Transform repository DATA into formatted columns.
@@ -2229,8 +2265,6 @@ page."
                       (gh-repo-github-user))))
   (gh-repo-clone-repo name))
 
-(defvar gh-repo-licences nil)
-(defvar gh-repo-gitignore-templates nil)
 
 (defcustom gh-repo-default-arguments '("--private"
                                        "--license_template=gpl-3.0"
@@ -2865,22 +2899,14 @@ extract data from a repository object."
     ("d" "description" "--description="
      :class transient-option
      :unsavable t)
-    ("p" "private" "--private"
-     :unsavable t)
+    ("p" "private" "--private" :unsavable t)
     ("t" "license_template" "--license_template="
      :class transient-option
-     :choices (lambda (&rest _)
-                (unless gh-repo-licences
-                  (setq gh-repo-licences (gh-repo-load-licences)))
-                (mapcar (apply-partially #'alist-get 'key) gh-repo-licences)))
+     :choices gh-repo--license-choices)
     ("g" "gitignore_template" "--gitignore_template="
      :class transient-option
-     :choices (lambda (&rest _)
-                (unless gh-repo-gitignore-templates
-                  (setq gh-repo-gitignore-templates
-                        (append
-                         (gh-repo-load-gitignore-templates) nil)))
-                gh-repo-gitignore-templates))
+     :always-read t
+     :choices gh-repo--gitignore-template-choices)
     ("T" "template repository" "--is_template")
     ("i" "has_issues" "--has_issues")
     ("P" "projects" "--has_projects")
