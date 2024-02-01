@@ -6,7 +6,7 @@
 ;; URL: https://github.com/KarimAziev/gh-repo
 ;; Keywords: lisp, vc, tools
 ;; Version: 1.0.0
-;; Package-Requires: ((emacs "29.1") (request "0.3.2") (transient "0.5.3") (ghub "3.6.0") (project "0.10.0"))
+;; Package-Requires: ((emacs "29.1") (transient "0.5.3") (ghub "3.6.0") (project "0.10.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
