@@ -4052,7 +4052,6 @@ Argument WORDS is a list of strings to be shuffled."
   :description "?q="
   :class 'transient-lisp-variable
   :always-read t
-  :set-value 'set-local
   :reader #'read-string
   :argument ""
   :variable 'gh-repo-list--text)
