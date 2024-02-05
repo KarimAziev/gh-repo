@@ -77,7 +77,7 @@
 (require 'color)
 (require 'project)
 (require 'ghub)
-
+(require 'parse-time)
 
 (defvar gh-repo-languages nil)
 (defvar gh-repo-licences nil)
@@ -762,6 +762,22 @@ specified in the alist when selecting a repository."
 
 (defvar-local gh-repo-tree--loading nil)
 (defvar-local gh-repo-tree--error-loading nil)
+
+(defmacro gh-repo--with-live-buffer (buffer &rest body)
+  "Execute BODY in BUFFER if it's a live buffer.
+
+Argument BUFFER is the buffer to be checked for liveliness and used for the BODY
+execution.
+
+Remaining arguments BODY are forms to be executed within the context of the live
+BUFFER."
+  (declare (indent 1)
+           (debug t))
+  (let ((buffer-var (make-symbol "buffer")))
+    `(let ((,buffer-var ,buffer))
+      (when (buffer-live-p ,buffer-var)
+       (with-current-buffer ,buffer-var
+        ,@body)))))
 
 
 (defun gh-repo--json-parse-string (str &optional object-type array-type
@@ -2324,47 +2340,61 @@ page."
 (defvar-local gh-repo-req-buffer nil)
 
 ;;;###autoload
-(defun gh-repo-export-repos ()
-  "List user's GitHub repositories in a buffer."
-  (interactive)
-  (let* ((spec '((full_name "%s" 35)
-                 (language "%s" 20)
-                 (description "%s" 65)
-                 (forks_count "%s" 3)
-                 (stargazers_count "%s" 3)
-                 (watchers_count "%s" 3)
-                 (open_issues_count "%s" 3)))
+(defun gh-repo-export-repos (&optional public)
+  "Export GitHub repository data to a buffer.
+
+Optional argument PUBLIC is a prefix argument that determines whether to include
+private repositories. If non-nil, private repositories are excluded."
+  (interactive "P")
+  (let* ((spec '((full_name "%s" 35 "Name")
+                 (language "%s" 20 "Language")
+                 (description "%s" 70 "Description")
+                 (forks_count "%s" 5 "Forks")
+                 (stargazers_count "%s" 5 "Stars")
+                 (fork "%s" 5 "Fork")))
          (buff (get-buffer-create "gh-repo-user-repos"))
          (rendered)
          (annotf (lambda (data)
-                   (mapconcat
-                    (pcase-lambda (`(,key ,format-str ,width))
-                      (let ((value (alist-get key data)))
-                        value
-                        (concat "|" (truncate-string-to-width
-                                     (format format-str
-                                             (or
-                                              value
-                                              ""))
-                                     width
-                                     nil
-                                     nil
-                                     nil)
-                                "|")))
-                    spec " "))))
+                   (concat "|"
+                           (mapconcat
+                            (pcase-lambda (`(,key ,format-str ,width))
+                              (let ((value (alist-get key data)))
+                                (concat (truncate-string-to-width
+                                         (format format-str
+                                                 (or
+                                                  value
+                                                  ""))
+                                         width
+                                         nil
+                                         ?\s
+                                         t))))
+                            spec "|")
+                           "|")))
+         (header (lambda (cols)
+                   (concat
+                    "|" (mapconcat
+                         (pcase-lambda (`(,_key ,_format-str ,width ,title))
+                           (concat (truncate-string-to-width
+                                    (or title "")
+                                    width
+                                    nil
+                                    ?\s
+                                    t)))
+                         cols "|")
+                    "|"
+                    "\n"
+                    "|" (mapconcat
+                         (pcase-lambda (`(,_key ,_format-str ,width ,_title))
+                           (make-string width ?-))
+                         cols "+")
+                    "|"))))
     (with-current-buffer buff
       (when (buffer-live-p gh-repo-req-buffer)
         (let ((message-log-max nil))
           (with-temp-message (or (current-message) "")
             (kill-buffer gh-repo-req-buffer))))
       (erase-buffer)
-      (insert (funcall annotf `((full_name . "Name")
-                                (language . "Language")
-                                (description . "Description")
-                                (forks_count . "Forks")
-                                (stargazers_count . "Stars")
-                                (watchers_count . "Watchers")
-                                (open_issues_count . "Issues"))))
+      (insert (funcall header spec))
       (when (and (not (get-buffer-window buff)))
         (pop-to-buffer-same-window buff))
       (setq gh-repo-req-buffer
@@ -2381,8 +2411,10 @@ page."
                                      (unless (member name rendered)
                                        (push name rendered)
                                        (puthash name item gh-repo-repos-hash)
-                                       (let ((line (funcall annotf item)))
-                                         (insert "\n" line)))))))
+                                       (unless (and public
+                                                    (alist-get 'private item))
+                                         (let ((line (funcall annotf item)))
+                                           (insert "\n" line))))))))
                              (ghub-continue req))))))))
 
 (defun gh-repo-format-time-diff (time)
@@ -2442,8 +2474,6 @@ function, right-to-left.  If no FNS are given, return a variadic
           (fns head)
           ((lambda (&optional arg &rest _) arg)))))
 
-(require 'parse-time)
-
 (defun gh-repo-list-action (action item)
   "Execute ACTION on the repository's full name from ITEM.
 
@@ -2475,7 +2505,6 @@ Display a list of GitHub repositories in a read-only buffer with custom
 keybindings for repository operations."
   (when (bound-and-true-p visual-line-mode)
     (visual-line-mode -1))
-  (setq revert-buffer-function #'gh-repo-list-revert)
   (use-local-map gh-repo-list-mode-map))
 
 
@@ -3003,7 +3032,7 @@ Argument TIMER-SYM is a symbol whose value is expected to be a timer object.
 Argument FN is the function to be applied in the buffer.
 
 Remaining arguments ARGS are the arguments to be passed to the function FN."
-  (when (and buffer (buffer-live-p buffer))
+  (gh-repo--with-live-buffer buffer
     (let ((buff-wnd (get-buffer-window buffer)))
       (with-current-buffer buffer
         (if (and buff-wnd
@@ -3881,18 +3910,59 @@ the fetch fails."
          (funcall on-success
                   code))))))
 
+
+(defun gh-repo-tree--handle-error (buffer err)
+  "Handle errors by updating BUFFER's state and header.
+
+Argument BUFFER is the buffer where the error handling will take place.
+
+Argument ERR is the error to be handled."
+  (gh-repo--with-live-buffer buffer
+    (setq gh-repo-tree--error-loading err)
+    (setq gh-repo-tree--loading nil)
+    (gh-repo-tree--update-header-line)))
+
+(defun gh-repo-tree--render (buffer value)
+  "Render a GitHub repository file tree in BUFFER.
+
+Argument BUFFER is the buffer to render the GitHub repository tree.
+
+Argument VALUE is the data structure representing the GitHub repository tree to
+be rendered."
+  (gh-repo--with-live-buffer buffer
+    (let ((inhibit-read-only t))
+      (delete-region (point-min)
+                     (point-max))
+      (setq gh-repo-tree--opened-dirs nil)
+      (funcall #'gh-repo-tree--render-tree
+               (gh-repo-tree--group-files
+                value))
+      (if-let ((readme (gh-repo--find-readme value)))
+          (gh-repo-tree--fetch-readme
+           readme
+           (lambda (code)
+             (gh-repo--with-live-buffer buffer
+               (let ((inhibit-read-only t))
+                 (goto-char (point-max))
+                 (insert "\n\n" (propertize "README"
+                                            'face 'header-line)
+                         "\n\n" code))
+               (setq gh-repo-tree--loading nil)
+               (setq gh-repo-tree--error-loading nil)
+               (gh-repo-tree--update-header-line)
+               (goto-char (point-min))))
+           (apply-partially #'gh-repo-tree--handle-error buffer))
+        (setq gh-repo-tree--loading nil)
+        (setq gh-repo-tree--error-loading nil)
+        (gh-repo-tree--update-header-line)
+        (goto-char (point-min))))))
+
 (defun gh-repo-tree--revert (&rest _)
   "Re-render the GitHub repository tree view."
   (let* ((repo (gh-repo-tree--current-buffer-repo))
          (tree (gh-repo-tree--paths-get
                 repo))
-         (buff (current-buffer))
-         (error-cb (lambda (err)
-                     (when (buffer-live-p buff)
-                       (with-current-buffer buff
-                         (setq gh-repo-tree--error-loading err)
-                         (setq gh-repo-tree--loading nil)
-                         (gh-repo-tree--update-header-line))))))
+         (buff (current-buffer)))
     (when gh-repo-tree--request-buffer
       (gh-repo-tree--abort-url-retrieve
        gh-repo-tree--request-buffer)
@@ -3900,74 +3970,14 @@ the fetch fails."
       (setq gh-repo-tree--loading nil)
       (gh-repo-tree--update-header-line))
     (if tree
-        (let ((inhibit-read-only t))
-          (delete-region (point-min)
-                         (point-max))
-          (setq gh-repo-tree--opened-dirs nil)
-          (funcall
-           #'gh-repo-tree--render-tree
-           (gh-repo-tree--group-files
-            tree))
-          (if-let ((readme (gh-repo--find-readme tree)))
-              (progn
-                (setq gh-repo-tree--loading t)
-                (gh-repo-tree--fetch-readme
-                 readme
-                 (lambda (code)
-                   (when (buffer-live-p buff)
-                     (with-current-buffer buff
-                       (let ((inhibit-read-only t))
-                         (goto-char (point-max))
-                         (insert "\n\n" (propertize "README"
-                                                    'face 'header-line)
-                                 "\n\n" code))
-                       (setq gh-repo-tree--loading nil)
-                       (setq gh-repo-tree--error-loading nil)
-                       (gh-repo-tree--update-header-line)
-                       (goto-char (point-min)))))
-                 error-cb))
-            (setq gh-repo-tree--loading nil)
-            (setq gh-repo-tree--error-loading nil)
-            (gh-repo-tree--update-header-line)
-            (goto-char (point-min)))
-          (goto-char (point-min)))
+        (gh-repo-tree--render buff tree)
       (setq gh-repo-tree--loading t)
       (gh-repo-tree--update-header-line)
       (setq gh-repo-tree--request-buffer
             (gh-repo-tree--fetch-repo-tree
              repo
-             (lambda (value)
-               (when (buffer-live-p buff)
-                 (with-current-buffer buff
-                   (let ((inhibit-read-only t))
-                     (delete-region (point-min)
-                                    (point-max))
-                     (setq gh-repo-tree--opened-dirs nil)
-                     (funcall
-                      #'gh-repo-tree--render-tree
-                      (gh-repo-tree--group-files
-                       value)))
-                   (if-let ((readme (gh-repo--find-readme value)))
-                       (gh-repo-tree--fetch-readme
-                        readme
-                        (lambda (code)
-                          (when (buffer-live-p buff)
-                            (with-current-buffer buff
-                              (let ((inhibit-read-only t))
-                                (goto-char (point-max))
-                                (insert "\n\n" (propertize "README"
-                                                           'face 'header-line)
-                                        "\n\n" code))
-                              (setq gh-repo-tree--loading nil)
-                              (setq gh-repo-tree--error-loading nil)
-                              (gh-repo-tree--update-header-line)
-                              (goto-char (point-min)))))
-                        error-cb)
-                     (setq gh-repo-tree--loading nil)
-                     (setq gh-repo-tree--error-loading nil)
-                     (gh-repo-tree--update-header-line)
-                     (goto-char (point-min))))))
-             error-cb)))))
+             (apply-partially #'gh-repo-tree--render buff)
+             (apply-partially #'gh-repo-tree--handle-error buff))))))
 
 (define-derived-mode gh-repo-tree-mode special-mode
   "Github Repository Tree Viewer."
