@@ -74,7 +74,6 @@
 
 (require 'vtable)
 (require 'url-parse)
-(require 'color)
 (require 'project)
 (require 'ghub)
 (require 'parse-time)
@@ -84,11 +83,6 @@
 (defvar gh-repo-gitignore-templates nil)
 
 (defvar gh-repo--cached-auth-data nil)
-(defvar gh-repo-special-color-column (color-darken-name
-                                      (frame-parameter
-                                       (selected-frame)
-                                       'background-color)
-                                      40))
 
 (defcustom gh-repo-search-code-queries '(("in"
                                           :choices
@@ -122,6 +116,22 @@
           (plist
            :key-type symbol
            :value-type sexp)))
+
+(defface gh-repo-dir-name
+  '((((background dark))
+     (:background "#2C2C2C2C2C2C"
+      :foreground "lawn green"))
+    (t (:foreground "DarkRed"
+        :background "LightGray")))
+  "*Face used for directory names in gh-repo tree."
+  :group 'diredfl)
+
+(defface gh-repo-file-name
+  '((((background dark)) (:foreground "Yellow"))
+    (t                   (:foreground "Blue")))
+  "*Face used for file names (without suffixes) in Dired buffers.
+This means the base name.  It does not include the `.'."
+  :group 'diredfl)
 
 (defun gh-repo--time-formatter (v)
   "Format a given time V as a human-readable time difference.
@@ -339,34 +349,18 @@ or a STRING for an actual completion operation."
                                              :width 15)
                                             (stargazers_count
                                              :name "Stars"
-                                             :color
-                                             ,gh-repo-special-color-column
                                              :width 4)
                                             (forks_count
                                              :name "Forks"
-                                             :color ,(color-lighten-name
-                                                      (frame-parameter
-                                                       (selected-frame)
-                                                       'background-color)
-                                                      40)
                                              :width 4)
                                             (watchers_count
                                              :name "Watch"
-                                             :color
-                                             ,gh-repo-special-color-column
                                              :width 4)
                                             (open_issues_count
                                              :name "Issues"
-                                             :color ,(color-lighten-name
-                                                      (frame-parameter
-                                                       (selected-frame)
-                                                       'background-color)
-                                                      40)
                                              :width 4)
                                             (fork
                                              :name "Fork"
-                                             :color
-                                             ,gh-repo-special-color-column
                                              :align "right"
                                              :width 4))
   "Columns to display when listing a user's repositories in a formatted table.
@@ -916,7 +910,16 @@ obtain the value for VARIABLE."
     map)
   "Keymap to use in minibuffer when searching repos.")
 
-(defmacro gh-repo-util--pipe (&rest functions)
+(eval-and-compile
+  (defun gh-repo--fn-expand (init-fn)
+    "If INIT-FN is a non-quoted symbol, add a sharp quote.
+Otherwise, return it as is."
+    (setq init-fn (macroexpand init-fn))
+    (if (symbolp init-fn)
+        `(#',init-fn)
+      `(,init-fn))))
+
+(defmacro gh-repo--pipe (&rest functions)
   "Return left-to-right composition from FUNCTIONS."
   (declare (debug t)
            (pure t)
@@ -934,7 +937,7 @@ obtain the value for VARIABLE."
               `(apply #',init-fn args)
             `(apply ,init-fn args)))))))
 
-(defmacro gh-repo-util--rpartial (fn &rest args)
+(defmacro gh-repo--rpartial (fn &rest args)
   "Return a partial application of FN to right-hand ARGS.
 
 ARGS is a list of the last N arguments to pass to FN. The result is a new
@@ -946,16 +949,44 @@ at the values with which this function was called."
                      `(apply #',fn (append pre-args (list ,@args)))
                    `(apply ,fn (append pre-args (list ,@args))))))))
 
-(defmacro gh-repo-util--compose (&rest functions)
+(defmacro gh-repo--compose (&rest functions)
   "Compose FUNCTIONS in reverse order from FUNCTIONS.
 
 Remaining arguments FUNCTIONS are the functions to be composed."
   (declare (debug t)
            (pure t)
            (side-effect-free t))
-  `(gh-repo-util--pipe ,@(reverse functions)))
+  `(gh-repo--pipe ,@(reverse functions)))
 
-(defmacro gh-repo-util-when (pred fn)
+(defmacro gh-repo--cond (&rest pairs)
+  "Return a function that expands a list of PAIRS to cond clauses.
+Every pair should be either:
+- a vector of [predicate transformer],
+- a list of (predicate transformer).
+
+The predicate can also be t.
+
+All of the arguments to function are applied to each of the predicates in turn
+until one returns a \"truthy\" value, at which point fn returns the result of
+applying its arguments to the corresponding transformer."
+  (declare (pure t)
+           (indent defun)
+           (side-effect-free error-free))
+  (setq pairs (mapcar (lambda (it)
+                        (if (listp it)
+                            (apply #'vector it)
+                          it))
+                      pairs))
+  (let ((args (make-symbol "args")))
+    `(lambda (&rest ,args)
+       (cond ,@(mapcar (lambda (v)
+                         (list
+                          (if (eq (aref v 0) t) t
+                           `(apply ,@(gh-repo--fn-expand (aref v 0)) ,args))
+                          `(apply ,@(gh-repo--fn-expand (aref v 1)) ,args)))
+                pairs)))))
+
+(defmacro gh-repo--when (pred fn)
   "Return a function that call FN if the result of calling PRED is non-nil.
 Both PRED and FN are called with one argument.
 If the result of PRED is nil, return the argument as is."
@@ -1030,31 +1061,58 @@ Argument FILE is the name of the file to read SSH host configurations from."
           (push curr result)))
       result)))
 
-(defun gh-repo-util-normalize-url-filename (filename)
-  "Transform FILENAME to git filename."
+(defun gh-repo-util-filename-to-owner-reponame (filename)
+  "Extract owner and repository name from a GitHub URL in FILENAME.
+
+Argument FILENAME is the path to a Git repository."
   (funcall (gh-repo-util-compose-while-not-nil
-            (gh-repo-util-when (gh-repo-util--compose
-                                not
-                                (apply-partially #'string-suffix-p
-                                                 ".git"))
-              (gh-repo-util--rpartial concat ".git"))
-            (gh-repo-util--rpartial string-join "/")
-            (gh-repo-util-when
-              (gh-repo-util--compose
+            (apply-partially
+             #'replace-regexp-in-string
+             "\\.git$" "")
+            (gh-repo--rpartial string-join "/")
+            (gh-repo--when
+              (gh-repo--compose
                (apply-partially #'<= 2)
                length)
-              (gh-repo-util--rpartial seq-take 2))
-            (gh-repo-util--rpartial split-string "/")
+              (gh-repo--rpartial seq-take 2))
+            (gh-repo--rpartial split-string "/")
             (apply-partially
              #'replace-regexp-in-string
              "^/\\|/$" ""))
            filename))
 
+(defun gh-repo-util-normalize-url-filename (filename)
+  "Transform FILENAME to git filename."
+  (funcall (gh-repo-util-compose-while-not-nil
+            (gh-repo--when (gh-repo--compose
+                                not
+                                (apply-partially #'string-suffix-p
+                                                 ".git"))
+              (gh-repo--rpartial concat ".git"))
+            #'gh-repo-util-filename-to-owner-reponame)
+           filename))
+
 (defun gh-repo-util-https-url-p (url)
   "Return t if URL string is githost with https protocol."
-  (string-match-p
-   (concat "https://" gh-repo-util-host-regexp)
-   url))
+  (and url
+       (or (string-prefix-p "https://" url)
+           (string-prefix-p "http://" url))))
+
+(defun gh-repo--ssh-to-https (ssh-remote)
+  "Convert SSH-REMOTE to https url."
+  (with-temp-buffer
+    (save-excursion
+      (insert ssh-remote))
+    (when (re-search-forward "@" nil t 1)
+      (when-let* ((beg (point))
+                  (end (re-search-forward ":" nil t 1)))
+        (string-trim
+         (concat "https://"
+                 (buffer-substring-no-properties
+                  beg (1- end))
+                 "/"
+                 (buffer-substring-no-properties
+                  end (point-max))))))))
 
 (defun gh-repo-util-url-https-to-ssh (url &optional ssh-host)
   "Transform URL with https protocol to ssh.
@@ -1144,8 +1202,8 @@ CURRENT-DEPTH is used for recoursive purposes."
   (when (>= max-depth current-depth)
     (let ((non-essential t))
       (let ((found-dirs))
-        (let
-            ((default-directory (expand-file-name (file-name-as-directory dir))))
+        (let ((default-directory (expand-file-name (file-name-as-directory
+                                                    dir))))
           (dolist
               (curr
                (directory-files default-directory nil
@@ -1828,6 +1886,24 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
         (ivy--exhibit)
       (ivy--insert-minibuffer ""))))
 
+
+(defun gh-repo--check-function-advice (function)
+  "Prints the advice names for the FUNCTION."
+  (when (advice--p (advice--symbol-function function))
+    (let* ((flist (indirect-function function))
+           (macrop (eq 'macro (car-safe flist)))
+           (hows))
+      (when macrop
+        (setq flist (cdr flist)))
+      (unless (and (autoloadp flist)
+                   (get function 'advice--pending))
+        (while (advice--p flist)
+          (push (cons (advice--car flist)
+                      (advice--how flist))
+                hows)
+          (setq flist (advice--cdr flist))))
+      hows)))
+
 (defun gh-repo-minibuffer-get-update-fn ()
   "Update the minibuffer's completion candidates based on the current mode."
   (let ((fn
@@ -1846,6 +1922,18 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
               (completion--flush-all-sorted-completions)
               (when (fboundp 'icomplete-exhibit)
                 (icomplete-exhibit))))
+           ((guard (and (eq completing-read-function 'completing-read-default)
+                        (assq 'vertico--advice
+                              (ignore-errors
+                                (gh-repo--check-function-advice
+                                 'completing-read-default)))))
+            (lambda (&rest _)
+              (when-let ((char (and
+                                (> (point)
+                                   (minibuffer-prompt-end))
+                                (char-before (point)))))
+                (call-interactively #'backward-delete-char)
+                (execute-kbd-macro (char-to-string char)))))
            ('completing-read-default
             (lambda (&rest _)
               (completion--flush-all-sorted-completions)
@@ -2119,16 +2207,18 @@ Return the category metadatum as the type of the target."
 (defun gh-repo-browse-current-repo ()
   "Open the current repository without exiting minibuffer."
   (interactive)
-  (gh-repo--minibuffer-action-no-exit #'gh-repo-browse))
+  (gh-repo--minibuffer-action-no-exit #'gh-repo-tree))
 
 (defun gh-repo-get-minibuffer-input ()
   "Retrieve user input from the minibuffer in GitHub repository."
   (when-let ((wind (active-minibuffer-window)))
     (with-selected-window wind
-      (let ((str (string-trim (or (car (split-string (buffer-substring-no-properties
-                                                      (minibuffer-prompt-end)
-                                                      (line-end-position))
-                                                     nil t))
+      (let ((str (string-trim (or (car
+                                   (split-string
+                                    (buffer-substring-no-properties
+                                     (minibuffer-prompt-end)
+                                     (line-end-position))
+                                    nil t))
                                   ""))))
         (unless (string-empty-p str)
           str)))))
@@ -2441,38 +2531,6 @@ calculate the time difference."
                                                      "s ago"))))
       (format format-str-pl value))))
 
-(defun gh-repo--pipe (&rest fns)
-  "Compose FNS into a single composite function.
-Return a function that takes a variable number of ARGS, applies
-the last function in FNS to ARGS, and returns the result of
-calling each remaining function on the result of the previous
-function, right-to-left.  If no FNS are given, return a variadic
-`identity' function."
-  (declare (pure t)
-           (side-effect-free error-free))
-  (let* ((head (car fns))
-         (tail (cdr fns)))
-    (cond (tail
-           (lambda (&rest args)
-             (let ((acc
-                    (apply head args)))
-               (let ((list tail)
-                     (i 0))
-                 (while list
-                   (let ((it
-                          (car-safe
-                           (prog1 list
-                             (setq list
-                                   (cdr list)))))
-                         (it-index i))
-                     (ignore it it-index)
-                     (setq acc
-                           (funcall it acc)))
-                   (setq i
-                         (1+ i))))
-               acc)))
-          (fns head)
-          ((lambda (&optional arg &rest _) arg)))))
 
 (defun gh-repo-list-action (action item)
   "Execute ACTION on the repository's full name from ITEM.
@@ -2529,7 +2587,7 @@ of the repository list."
                    (gh-repo--plist-merge
                     (seq-copy pl)
                     (list :getter
-                          (gh-repo-util--compose (lambda (it)
+                          (gh-repo--compose (lambda (it)
                                                    (or it ""))
                                                  (gh-repo-list-map-getter
                                                   field-path)))))))
@@ -2660,7 +2718,7 @@ results.
 Optional argument PER-PAGE is an integer representing the number of results per
 page."
   (unless page (setq page 1))
-  (let ((buff-name (concat "*gh-repo " "search/repositories" "*")))
+  (let* ((buff-name (concat "*gh-repo " "search/repositories" "*")))
     (cond ((when-let ((buff (get-buffer buff-name)))
              (and
               (= page (buffer-local-value 'gh-repo-list--page buff))
@@ -2728,13 +2786,14 @@ page."
                                   (t
                                    (with-current-buffer buff
                                      (setq gh-repo-list--page page
-                                           gh-repo-list--total-count
-                                           (or gh-repo-list--total-count
-                                               total))
-                                     (setq gh-repo-list--items (nconc gh-repo-list--items value)
-                                           gh-repo-list--columns gh-repo-list-search-columns)
-                                     (setq gh-repo-tree--loading (and (not gh-repo-list--stop)
-                                                                      (> total (length gh-repo-list--items))))
+                                           gh-repo-list--total-count (or gh-repo-list--total-count
+                                                                         total)
+                                           gh-repo-list--items (nconc gh-repo-list--items value)
+                                           gh-repo-list--columns gh-repo-list-search-columns
+                                           gh-repo-tree--loading (and (not gh-repo-list--stop)
+                                                                      (> total
+                                                                         (length
+                                                                          gh-repo-list--items))))
                                      (gh-repo-list--update-header-line)
                                      (gh-repo-list-revert)
                                      (when gh-repo-list--stop
@@ -2872,9 +2931,11 @@ returned from the GitHub API before it is displayed."
                                 (let* ((prompt (format "Couldn't unstar %s: "
                                                        owner/repo))
                                        (err
-                                        (concat prompt " " (or (gh-repo-tree--get-status-error
-                                                                status)
-                                                               ""))))
+                                        (concat prompt " "
+                                                (or
+                                                 (gh-repo-tree--get-status-error
+                                                  status)
+                                                 ""))))
                                   (message err)))
                    :callback (lambda (&rest _args)
                                (message "Unstarred %s" owner/repo))))
@@ -2891,12 +2952,40 @@ Argument OWNER/REPO is a string in the format \"user/repo\"."
                              (let* ((prompt (format "Couldn't star %s: "
                                                     owner/repo))
                                     (err
-                                     (concat prompt " " (or (gh-repo-tree--get-status-error
-                                                             status)
-                                                            ""))))
+                                     (concat prompt " "
+                                             (or
+                                              (gh-repo-tree--get-status-error
+                                               status)
+                                              ""))))
                                (message err)))
                 :callback (lambda (&rest _args)
                             (message "Starred %s" owner/repo))))
+
+(defun gh-repo--pipeline (&rest fns)
+  "Compose and apply a sequence of functions FNS to arguments.
+
+Remaining arguments FNS are functions to be composed and applied in sequence."
+  (declare (pure t)
+           (side-effect-free error-free))
+  (let* ((head (car fns))
+         (tail (cdr fns)))
+    (cond (tail
+           (lambda (&rest args)
+             (let ((acc
+                    (apply head args)))
+               (let ((list tail))
+                 (while list
+                   (let ((it
+                          (car-safe
+                           (prog1 list
+                             (setq list
+                                   (cdr list))))))
+                     (setq acc
+                           (funcall it acc)))))
+               acc)))
+          (fns head)
+          ((lambda (&optional arg &rest _) arg)))))
+
 
 (defun gh-repo-list-map-getter (getter)
   "Create a GETTER function for accessing repository data.
@@ -2911,7 +3000,7 @@ extract data from a repository object."
      (lambda (obj &rest _)
        (cdr (assoc-string getter obj))))
     ((pred (listp))
-     (apply #'gh-repo--pipe
+     (apply #'gh-repo--pipeline
             (mapcar #'gh-repo-list-map-getter getter)))))
 
 
@@ -2958,8 +3047,9 @@ extract data from a repository object."
                     (concat  "Github User: "
                              (if
                                  (or (not (car-safe gh-repo--cached-auth-data))
-                                     (string-empty-p (car
-                                                      gh-repo--cached-auth-data))
+                                     (string-empty-p
+                                      (car
+                                       gh-repo--cached-auth-data))
                                      (not (cdr-safe gh-repo--cached-auth-data)))
                                  "(not logged)"
                                (propertize
@@ -3200,6 +3290,8 @@ Argument REPO is a string representing the GitHub repository."
     map)
   (setq buffer-read-only t))
 
+(put 'gh-repo-tree-file-mode 'permanent-local t)
+
 (defun gh-repo-tree-clone-repo (repo)
   "Clone a GitHub repository.
 
@@ -3348,6 +3440,7 @@ retrieved file content."
                                         nil t 1)))
                        (set-window-point wnd found)
                        found))))))))))))
+
 
 (defun gh-repo-tree--current-repo-path ()
   "Return cons with repository name and file path."
@@ -3555,6 +3648,19 @@ search."
             (delete dir gh-repo-tree--opened-dirs))
     (push dir gh-repo-tree--opened-dirs)))
 
+(defun gh-repo--insert-octicon-icon (icon &rest args)
+  "Insert an Octicon ICON if graphical display and `all-the-icons' are available.
+
+Argument ICON is the name of the octicon to display.
+
+Remaining arguments ARGS are additional properties to customize the ICON
+display."
+  (when (and
+         (display-graphic-p)
+         (require 'all-the-icons nil t)
+         (fboundp 'all-the-icons-octicon))
+    (insert (apply #'all-the-icons-octicon icon args) " ")))
+
 (defun gh-repo-tree--insert-directory-entry (row parent &rest props)
   "Insert ROW with optional PADDING into a buffer and add text PROPS.
 
@@ -3569,9 +3675,17 @@ the padding of the inserted row."
                                      (length
                                       (split-string parent "/" t)))
                                   ?\ )
-                   " ")))
+                   " "))
+        (face (if (facep 'gh-repo-file-name)
+                  'gh-repo-file-name
+                nil)))
     (insert padding)
-    (insert row)
+    (when (and
+           (display-graphic-p)
+           (require 'all-the-icons nil t)
+           (fboundp 'all-the-icons-icon-for-file))
+      (insert (all-the-icons-icon-for-file row) " "))
+    (insert (if (not face) row (propertize row 'face face)))
     (add-text-properties beg (point)
                          (append (list 'parent parent
                                        'child row)
@@ -3665,16 +3779,22 @@ row."
   (let ((inhibit-read-only t)
         (beg (point))
         (indicator (if opened "- " "+ "))
+        (face (if (facep 'gh-repo-dir-name)
+                  'gh-repo-dir-name
+                nil))
         (padding (if parent
                      (make-string (length
                                    (split-string parent "/" t))
                                   ?\ )
                    "")))
     (insert padding indicator)
+    (gh-repo--insert-octicon-icon "file-directory"
+                                  :face face)
     (insert-text-button row 'action 'gh-repo-tree-toggle-row)
     (add-text-properties beg (point)
                          (append (list 'parent parent
-                                       'child row)
+                                       'child row
+                                       'face face)
                                  props))))
 
 (defun gh-repo-tree--render-tree (tree &optional parent)
@@ -3922,6 +4042,36 @@ Argument ERR is the error to be handled."
     (setq gh-repo-tree--loading nil)
     (gh-repo-tree--update-header-line)))
 
+(defun gh-repo-tree--render-tree-header ()
+  "Render the header for a GitHub repository's file tree in a buffer."
+  (pcase-let ((inhibit-read-only t)
+              (`(,user ,repo)
+               (split-string
+                (gh-repo-tree--current-buffer-repo)
+                "/" t))
+              (marker))
+    (insert-text-button user 'action
+                        #'gh-repo-list-user-repos
+                        'button-data user)
+    (insert " / " repo "\n")
+    (when (equal user (car (gh-repo-authenticate)))
+      (setq marker (point-marker))
+      (gh-repo-get (concat "/repos/" user "/" repo "/traffic/clones") nil
+                   :query `((per . "week"))
+                   :reader
+                   (lambda (&rest _)
+                     (gh-repo--json-reader))
+                   :callback
+                   (lambda (value _headers _status _req)
+                     (gh-repo--with-live-buffer (marker-buffer marker)
+                       (save-excursion
+                         (goto-char marker)
+                         (let ((inhibit-read-only t))
+                           (insert (format "Clones: %s, %s (uniq)\n"
+                                           (alist-get 'count value)
+                                           (alist-get 'uniques value)))))))))))
+
+
 (defun gh-repo-tree--render (buffer value)
   "Render a GitHub repository file tree in BUFFER.
 
@@ -3933,6 +4083,7 @@ be rendered."
     (let ((inhibit-read-only t))
       (delete-region (point-min)
                      (point-max))
+      (gh-repo-tree--render-tree-header)
       (setq gh-repo-tree--opened-dirs nil)
       (funcall #'gh-repo-tree--render-tree
                (gh-repo-tree--group-files
@@ -3979,6 +4130,8 @@ be rendered."
              (apply-partially #'gh-repo-tree--render buff)
              (apply-partially #'gh-repo-tree--handle-error buff))))))
 
+
+
 (define-derived-mode gh-repo-tree-mode special-mode
   "Github Repository Tree Viewer."
   "Display a GitHub repository's file structure.
@@ -3989,6 +4142,7 @@ expandable rows, and update the view to reflect changes in the repository's
 structure."
   (setq-local buffer-undo-list t)
   (setq-local text-scale-remap-header-line t)
+  (setq-local revert-buffer-function #'gh-repo-tree--revert)
   (unless gh-repo-tree--old-header-line
     (setq gh-repo-tree--old-header-line header-line-format))
   (gh-repo-tree--update-header-line)
@@ -4025,6 +4179,21 @@ Argument REPO is a string representing the GitHub repository in the format
         (setq buffer-read-only t)
         buff))))
 
+
+(defun gh-repo--normalize-repo-name (repo)
+  "Normalize REPO to OWNER/REPO format."
+  (funcall (gh-repo--compose
+            gh-repo-util-filename-to-owner-reponame
+            (gh-repo--when
+              gh-repo-util-https-url-p
+              (gh-repo--compose
+               url-filename
+               url-generic-parse-url))
+            (gh-repo--when
+              gh-repo-util-ssh-url-p
+              gh-repo--ssh-to-https))
+           repo))
+
 ;;;###autoload
 (defun gh-repo-tree (repo)
   "Display a GitHub repository's file structure in a buffer.
@@ -4034,7 +4203,8 @@ Argument REPO is a string representing the GitHub repository in the format
   (interactive (list (or (gh-repo-tree--current-buffer-repo)
                          (gh-repo-search-repos)
                          (read-string "User and repository (user/repo): "))))
-  (let ((buff (gh-repo-tree--setup-repo-buffer repo)))
+  (let ((buff (gh-repo-tree--setup-repo-buffer
+               (gh-repo--normalize-repo-name repo))))
     (if-let ((wnd (get-buffer-window buff)))
         (select-window wnd)
       (gh-repo-tree--window-with-other-window
