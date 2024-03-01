@@ -4263,6 +4263,7 @@ such as when suggesting a new feature or reporting an issue."
                           (or gh-repo-list--text "")
                           (gh-repo-format-args-to-query
                            (gh-repo-get-args-for-query))))
+   :class transient-column
    :setup-children
    (lambda (&rest _argsn)
      (mapcar
@@ -4282,7 +4283,8 @@ such as when suggesting a new feature or reporting an issue."
                              (t it)))
                      (gh-repo-search-queries-to-options
                       gh-repo-search-code-queries))))))]
-  [:setup-children
+  [:class transient-column
+   :setup-children
    (lambda (&rest _argsn)
      (mapcar
       (apply-partially #'transient-parse-suffix
