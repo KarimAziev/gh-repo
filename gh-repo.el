@@ -4267,7 +4267,7 @@ such as when suggesting a new feature or reporting an issue."
    (lambda (&rest _argsn)
      (mapcar
       (apply-partially #'transient-parse-suffix
-                       transient--prefix)
+                       (oref transient--prefix command))
       (append
        (list '("."  "Search for: " gh-repo-search-term-argument))
        (delq nil
@@ -4286,7 +4286,7 @@ such as when suggesting a new feature or reporting an issue."
    (lambda (&rest _argsn)
      (mapcar
       (apply-partially #'transient-parse-suffix
-                       transient--prefix)
+                       (oref transient--prefix command))
       (mapcar (pcase-lambda (`(,k ,descr ,fn))
                 (list (char-to-string k)
                       descr
