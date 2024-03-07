@@ -3103,14 +3103,58 @@ as its argument."
   "Preview a GitHub repo file without exiting minibuffer."
   (interactive)
   (gh-repo--minibuffer-action-no-exit
-   #'gh-repo-tree--preview-repo-file-action))
+   (lambda (path)
+     (let* ((wnd (active-minibuffer-window))
+            (repo (gh-repo-tree--current-buffer-repo)))
+       (with-selected-window wnd
+         (let ((prompt (minibuffer-prompt)))
+           (when (string-prefix-p (concat repo "/") prompt)
+             (setq path (concat
+                         (substring-no-properties
+                          prompt
+                          (1+ (length repo)))
+                         path)))))
+       (if (gh-repo-tree--find-by-path
+            path
+            (gh-repo-tree--paths-get repo))
+           (gh-repo-tree--preview-repo-file-action path)
+         (and wnd
+              (with-selected-window wnd
+                (when-let ((key (where-is-internal
+                                 'exit-minibuffer
+                                 minibuffer-mode-map
+                                 t t
+                                 t)))
+                  (execute-kbd-macro key)))))))))
 
 (defvar gh-repo-tree-completion-file-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-j")
                 #'gh-repo-tree--minibuffer-preview-file)
+    (define-key map [remap backward-kill-word]
+                #'gh-repo-tree-maybe-throw-up)
+    (define-key map (kbd "C-<backspace>") #'gh-repo-tree-throw-up)
+    (define-key map (kbd "C-l") #'gh-repo-tree-throw-up)
+    (define-key map (kbd "C-.") #'gh-repo-tree-throw-next)
     map)
   "Keymap for minibuffer file search with preview function.")
+
+(defun gh-repo-tree-throw-up ()
+  "Throw a non-local exit with tag up."
+  (interactive)
+  (throw 'up t))
+
+(defun gh-repo-tree-maybe-throw-up ()
+  "Throw an error if minibuffer is empty, else delete the last word."
+  (interactive)
+  (if (string-empty-p (string-trim (minibuffer-contents-no-properties)))
+      (throw 'up t)
+    (backward-kill-word 1)))
+
+(defun gh-repo-tree-throw-next ()
+  "Throw a non-local exit with tag next."
+  (interactive)
+  (throw 'next 1))
 
 (defun gh-repo-tree--debounce-run-in-buffer (buffer timer-sym fn &rest args)
   "Execute function FN with ARGS in BUFFER if it's live and visible.
@@ -3208,45 +3252,206 @@ inherits the current input method."
 
 (defvar gh-repo-tree-minibuffer-timer nil)
 
-(defun gh-repo-tree-find-other-file (repo)
-  "Switch to a file from a GitHub repo.
+(defun gh-repo-tree--get-from-alist (path alist)
+  "Return a value obtained by traversing an association list using a given PATH.
+Argument PATH is a list representing the PATH to traverse in the association
+list.
+Argument ALIST is the association list to traverse."
+  (let* ((fns (mapcar (lambda (key)
+                        (lambda (val)
+                          (when (listp val)
+                            (cdr-safe (if (stringp key)
+                                          (assoc-string key val)
+                                        (assq key val))))))
+                      path))
+         (start-val (funcall (pop fns) alist)))
+    (seq-reduce
+     (lambda (acc fn)
+       (setq acc (funcall fn acc)))
+     fns
+     start-val)))
 
-Argument REPO is a string representing the name of the GitHub repository."
-  (interactive (list (or (gh-repo-tree--current-buffer-repo)
-                         (gh-repo-search-repos)
-                         (read-string "User and repository (user/repo): "))))
-  (let ((complete-fn (lambda (tree)
-                       (let* ((alist   (mapcar
-                                        (lambda (x)
-                                          (cons (cdr (assq 'path x))
-                                                (cdr (assq 'url x))))
-                                        tree))
-                              (path
+(defun gh-repo-tree--sort-groupped-paths (paths)
+  "Sort PATHS, prioritizing cons cells over other elements.
+
+Argument PATHS is a list of file paths to be sorted."
+  (seq-sort-by (lambda (it)
+                 (if (consp it) 1 -1))
+               #'> paths))
+
+(defun gh-repo-tree--read-file-tree-full (repo tree &rest _)
+  "Display a file TREE from a GitHub repository for selection.
+
+Argument REPO is a string representing the name of the repository.
+
+Argument TREE is a list of alists, each representing a file in the repository.
+
+Remaining arguments _ are ignored."
+  (let ((alist   (mapcar
+                  (lambda (x)
+                    (cons (cdr (assq 'path x))
+                          (cdr (assq 'url x))))
+                  tree)))
+    (gh-repo-tree-completing-read-with-keymap
+     repo
+     (mapcar
+      #'car
+      alist)
+     gh-repo-tree-completion-file-map
+     (lambda
+       ()
+       (add-hook
+        'after-change-functions
+        (lambda
+          (&rest
+           _)
+          (gh-repo-tree--debounce
+           'gh-repo-tree-minibuffer-timer
+           1
+           'gh-repo-tree--minibuffer-preview-file))
+        nil
+        t)))))
+
+(defun gh-repo-tree--read-file-name (repo paths &optional initial-path)
+  "Prompt user to select a file from a hierarchical list of paths.
+
+Argument REPO is a string representing the GitHub repository.
+
+Argument PATHS is a list of file paths within the repository.
+
+Optional argument INITIAL-PATH is a string representing the initial path within
+the repository."
+  (let* ((groupped-alist (gh-repo-tree--group-files paths))
+         (alist groupped-alist)
+         (annot-fn (lambda (str)
+                     (if (stringp (assoc-string str alist))
+                         ""
+                       "/")))
+         (full-path initial-path))
+    (when full-path
+      (let ((parts (split-string full-path "/" t)))
+        (setq alist (and parts
+                         (gh-repo-tree--get-from-alist parts
+                                                       groupped-alist)))
+        (unless alist
+          (setq parts (butlast parts 1))
+          (setq full-path (and parts
+                               (string-join parts "/")))
+          (setq alist (if parts (gh-repo-tree--get-from-alist parts
+                                                              groupped-alist)
+                        groupped-alist)))))
+    (catch 'done
+      (while
+          (let ((item (catch 'up
+                        (let ((choice
                                (gh-repo-tree-completing-read-with-keymap
-                                repo
-                                (mapcar
-                                 #'car
-                                 alist)
-                                gh-repo-tree-completion-file-map
+                                (string-join
+                                 (delq
+                                  nil
+                                  (list
+                                   repo
+                                   full-path
+                                   ""))
+                                 "/")
                                 (lambda
-                                  ()
-                                  (add-hook
-                                   'after-change-functions
-                                   (lambda
-                                     (&rest
-                                      _)
-                                     (gh-repo-tree--debounce
-                                      'gh-repo-tree-minibuffer-timer
-                                      1
-                                      'gh-repo-tree--minibuffer-preview-file))
-                                   nil
-                                   t))))
-                              (url (cdr (assoc-string path
-                                                      alist))))
-                         (gh-repo-tree--download-repo-path
-                          repo
-                          path
-                          url)))))
+                                  (str
+                                   pred
+                                   action)
+                                  (if
+                                      (eq
+                                       action
+                                       'metadata)
+                                      `(metadata
+                                        (annotation-function
+                                         .
+                                         ,annot-fn)
+                                        (display-sort-function . gh-repo-tree--sort-groupped-paths))
+                                    (complete-with-action
+                                     action
+                                     (gh-repo-tree--sort-groupped-paths
+                                      alist)
+                                     str
+                                     pred)))
+                                gh-repo-tree-completion-file-map)))
+                          (assoc-string choice alist)))))
+            (cond ((eq item t)
+                   (let ((parts
+                          (and full-path
+                               (butlast (split-string full-path "/" t) 1))))
+                     (setq full-path (when parts
+                                       (string-join parts "/")))
+                     (setq alist (if parts
+                                     (gh-repo-tree--get-from-alist
+                                      parts
+                                      groupped-alist)
+                                   groupped-alist))))
+                  ((stringp item)
+                   (setq full-path (string-join (delq nil
+                                                      (list full-path
+                                                            item))
+                                                "/"))
+                   (throw 'done full-path))
+                  ((consp item)
+                   (setq full-path (string-join
+                                    (delq
+                                     nil
+                                     (list full-path
+                                           (car item)))
+                                    "/"))
+                   (setq alist (cdr item)))))))))
+
+(defun gh-repo-tree--read-tree-file (&rest args)
+  "Iterate through file readers until one successfully read a tree file.
+
+Remaining arguments ARGS are strings passed as command arguments to
+`gh-repo-tree--read-tree-file'."
+  (let ((readers '(gh-repo-tree--read-file-name
+                   gh-repo-tree--read-file-tree-full))
+        (idx 0)
+        (result))
+    (while (numberp (catch 'next
+                      (let ((reader (nth idx readers)))
+                        (setq result (apply reader args)))))
+      (setq idx (if (nth (1+ idx) readers)
+                    (1+ idx)
+                  0)))
+    result))
+
+(defun gh-repo-tree--find-by-path (path paths)
+  "Find an item in PATHS where its \\='PATH matches PATH.
+
+Argument PATH is the string to match against the `path' key in the alists.
+
+Argument PATHS is a list of alists where each alist represents a code item."
+  (seq-find (lambda (alist)
+              (when-let ((item-path (cdr (assq 'path alist))))
+                (string= item-path path)))
+            paths))
+
+(defun gh-repo-tree-find-other-file (repo &optional initial-file)
+  "Navigate and preview files in a GitHub repository.
+
+Argument REPO is the repository identifier for which to find the other file.
+
+Optional argument INITIAL-FILE is the initial file path to start the search
+from."
+  (interactive
+   (let ((repo-cell (gh-repo-tree--current-repo-path)))
+     (if (car repo-cell)
+         (list (car repo-cell)
+               (cdr repo-cell))
+       (list (or (gh-repo-tree--current-buffer-repo)
+                 (gh-repo-search-repos)
+                 (read-string "User and repository (user/repo): "))
+             nil))))
+  (let ((complete-fn (lambda (tree)
+                       (let* ((path
+                               (gh-repo-tree--read-tree-file repo tree
+                                                             initial-file))
+                              (cell (gh-repo-tree--find-by-path path tree))
+                              (url (cdr (assq 'url cell))))
+                         (gh-repo-tree--download-repo-path repo path
+                                                           url)))))
     (if (gh-repo-tree--paths-get repo)
         (funcall complete-fn (gh-repo-tree--paths-get repo))
       (gh-repo-tree--fetch-repo-tree
