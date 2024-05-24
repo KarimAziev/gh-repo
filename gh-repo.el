@@ -1777,6 +1777,10 @@ Remove a repository request with the given FULLNAME."
     (ghub-delete (concat "/repos/" fullname) nil
                  :auth (cdr auth)
                  :username (car auth)
+                 :errorback (lambda (_err _headers status _req)
+                              (let ((err
+                                     (gh-repo-tree--get-status-error status)))
+                                (message (or err "Error"))))
                  :callback
                  (lambda (_value &rest _)
                    (message "Repository %s removed" fullname)))))
@@ -2399,14 +2403,21 @@ page."
                :payload payload
                :auth (cdr auth)
                :username (car auth)
+               :errorback (lambda (_err _headers status _req)
+                            (let ((err
+                                   (gh-repo-tree--get-status-error
+                                    status)))
+                              (message (or err
+                                           "gh-repo: An error occured"))))
                :callback
                (lambda (value &rest _)
-                 (if
-                     (yes-or-no-p (format "Clone repo %s?"
-                                          (alist-get
-                                           'full_name value)))
-                     (gh-repo-clone-repo (alist-get 'full_name value))
-                   (message "Repository created."))))))
+                 (if-let ((name (alist-get 'full_name value)))
+                     (if
+                         (yes-or-no-p (format "Clone repo %s?"
+                                              name))
+                         (gh-repo-clone-repo name)
+                       (message "gh-repo: Repository %s created." name))
+                   (message "gh-repo: Repository is not created"))))))
 
 ;;;###autoload
 (defun gh-repo-create-repo (args)
