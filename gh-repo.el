@@ -1394,9 +1394,9 @@ The default value is nil."
 (defun gh-repo-change-user ()
   "Search for gh token in `auth-sources'."
   (interactive)
-  (if gh-repo--cached-auth-data
-      (setq gh-repo-ghub-auth-info nil)
-    (gh-repo-authenticate t))
+  (when gh-repo--cached-auth-data
+    (setq gh-repo-ghub-auth-info nil))
+  (gh-repo-authenticate t)
   (when transient-current-command
     (transient-setup transient-current-command)))
 
