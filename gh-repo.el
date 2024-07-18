@@ -526,6 +526,20 @@ as a string."
            :value nil)
           (directory)))
 
+(defcustom gh-repo-after-create-repo-hook nil
+  "Hook run after creating a repository.
+
+A hook that runs after a repository is successfully created.
+
+Functions added to this hook are executed with the newly created
+repository's directory as the current working directory.
+
+This can be used to perform additional setup or configuration
+tasks, such as initializing submodules, setting up virtual
+environments, or installing dependencies."
+  :group 'gh-repo
+  :type 'hook)
+
 (defmacro gh-repo-tree--window-with-other-window (&rest body)
   "Execute BODY in other window.
 If other window doesn't exists, split selected window right."
@@ -1285,8 +1299,6 @@ CURRENT-DEPTH is used for recoursive purposes."
       (when (fboundp 'xwidget-webkit-fit-width)
         (xwidget-webkit-fit-width)))))
 
-(defvar gh-repo-after-create-repo-hook nil
-  "List of hooks to run after cloning new repository.")
 
 (defun gh-repo-exec-in-dir (command project-dir &optional callback)
   "Execute COMMAND in PROJECT-DIR, optionally running CALLBACK on completion.
@@ -1483,6 +1495,105 @@ its value is the DATA to be formatted for that column."
           (plist-put plist-a prop-name val)))))
   plist-a)
 
+(defvar url-http-end-of-headers)
+(defun gh-repo--handle-response (status req)
+  "Handle the response from a request, processing errors and pagination.
+
+Argument STATUS is a plist representing what happened during the request,
+with the most recent events first, or an empty list if no events have
+occurred.
+
+Each pair is one of:
+
+\(:redirect REDIRECTED-TO) - The request was redirected to this URL.
+
+\(:error (error type . DATA)) - An error occurred.
+
+Argument REQ is the instance of `ghub--req'.
+
+This function is intended to be a replacement for `ghub--handle-response',
+which may not always invoke an error handler in case of an error. See the
+discussion in issue #166 (https://github.com/magit/ghub/issues/166)."
+  (let
+      ((buffer (current-buffer))
+       (err       (plist-get status :error))
+       (prev       (ghub--req-url req))
+       (errorback (ghub--req-errorback req))
+       (header-err
+        (when (memq url-http-end-of-headers '(nil 0))
+          (list 'error 'http
+                "missing headers; but there's a patch for that see https://github.com/magit/ghub/wiki/Known-Issues"))))
+    (unwind-protect
+        (progn
+          (set-buffer-multibyte t)
+          (cond ((and (or err header-err) errorback)
+                 (setf (ghub--req-url req) prev)
+                 (funcall (if (eq errorback t)
+                              'ghub--errorback
+                            errorback)
+                          (or err header-err)
+                          (unless header-err
+                            (ignore-errors
+                              (ghub--handle-response-headers status req)))
+                          status req))
+                (t
+                 (let* ((unpaginate (ghub--req-unpaginate req))
+                        (headers
+                         (unless header-err
+                           (ignore-errors
+                             (ghub--handle-response-headers status req))))
+                        (payload    (ghub--handle-response-payload req))
+                        (payload    (ghub--handle-response-error status payload
+                                                                 req))
+                        (value      (ghub--handle-response-value payload req))
+                        (next       (cdr (assq 'next (ghub-response-link-relations
+                                                      req headers payload)))))
+                   (when (numberp unpaginate)
+                     (cl-decf unpaginate))
+                   (setf (ghub--req-url req)
+                         (url-generic-parse-url next))
+                   (setf (ghub--req-unpaginate req) unpaginate)
+                   (or (and next
+                            unpaginate
+                            (or (eq unpaginate t)
+                                (>  unpaginate 0))
+                            (ghub-continue req))
+                       (let ((callback  (ghub--req-callback req))
+                             (errorback (ghub--req-errorback req)))
+                         (cond ((and err errorback)
+                                (setf (ghub--req-url req) prev)
+                                (funcall (if (eq errorback t)
+                                             'ghub--errorback
+                                           errorback)
+                                         err headers status req))
+                               (callback
+                                (funcall callback value headers status req))
+                               (t value))))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(defun gh-repo--request (&rest args)
+  "Make a request using `gh-repo--handle-response' to process the response.
+
+This function temporarily overrides the `ghub--make-req' function to use
+`gh-repo--handle-response' as the :handler in the request parameters. This
+enables custom handling of the response, particularly for dealing with errors
+and pagination.
+
+Other arguments ARGS are passed directly to the `ghub-request' function.
+
+This function is intended to address issues discussed in issue #166
+\(https://github.com/magit/ghub/issues/166) by ensuring that a custom error
+handler is always invoked when an error occurs."
+  (let ((orig-fn (symbol-function 'ghub--make-req)))
+    (cl-letf
+        (((symbol-function 'ghub--make-req)
+          (lambda
+            (&rest ghub-args)
+            (apply orig-fn
+                   (plist-put ghub-args :handler #'gh-repo--handle-response)))))
+      (apply #'ghub-request args))))
+
 (defun gh-repo-get (resource &optional params &rest args)
   "Retrieve a GitHub repository's data using specified RESOURCE and parameters.
 
@@ -1513,7 +1624,7 @@ to the `ghub-get' function."
                                                                resource)))
                       resource)
                     "?" query-str))))
-    (apply #'ghub-get url params
+    (apply #'gh-repo--request "GET" url params
            :auth (cdr auth)
            :username (car auth)
            (gh-repo--plist-omit '(:query)
@@ -1530,7 +1641,7 @@ Optional argument PARAMS is an alist of parameters to send with the PUT request.
 Remaining arguments ARGS are additional arguments passed to the `ghub-put'
 function."
   (let ((auth (gh-repo-authenticate)))
-    (apply #'ghub-put resource params
+    (apply #'gh-repo--request "PUT" resource params
            :auth (cdr auth)
            :username (car auth)
            args)))
@@ -1547,7 +1658,7 @@ request.
 Remaining arguments ARGS are additional arguments passed to the `ghub-delete'
 function."
   (let ((auth (gh-repo-authenticate)))
-    (apply #'ghub-delete resource params
+    (apply #'gh-repo--request "DELETE" resource params
            :auth (cdr auth)
            :username (car auth)
            args)))
@@ -1562,7 +1673,6 @@ Argument URL is the url of a GitHub gist."
   (when (and
          (require 'ghub nil t)
          (fboundp 'ghub-continue)
-         (fboundp 'ghub-get)
          (fboundp 'ivy-update-candidates)
          (fboundp 'ivy--reset-state)
          (fboundp 'ivy--exhibit)
@@ -2172,7 +2282,19 @@ Return the category metadatum as the type of the target."
 
 (defvar gh-repo-minibuffer-targets-finders
   '(gh-repo-minibuffer-ivy-selected-cand
+    gh-repo--vertico-selected
     gh-repo-get-minibuffer-get-default-completion))
+
+(declare-function vertico--candidate "ext:vertico")
+(declare-function vertico--update "ext:vertico")
+
+(defun gh-repo--vertico-selected ()
+  "Target the currently selected item in Vertico.
+Return the category metadatum as the type of the target."
+  (when (bound-and-true-p vertico--input)
+    (vertico--update)
+    (cons (completion-metadata-get (gh-repo-minibuffer-get-metadata) 'category)
+          (vertico--candidate))))
 
 (defun gh-repo-minibuffer-get-current-candidate ()
   "Return cons filename for current completion candidate."
