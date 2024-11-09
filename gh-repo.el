@@ -1132,11 +1132,11 @@ Argument FILENAME is the path to a Git repository."
   "Transform URL with https protocol to ssh.
 With optional argument SSH-HOST also replace host."
   (require 'url-parse)
-  (when-let ((urlobj
+  (when-let* ((urlobj
               (when (and url
                          (gh-repo-util-https-url-p url))
                 (url-generic-parse-url url))))
-    (when-let ((host (url-host urlobj))
+    (when-let* ((host (url-host urlobj))
                (reponame (gh-repo-util-normalize-url-filename
                           (url-filename urlobj))))
       (string-trim (concat "git@" (or ssh-host host)
@@ -1241,7 +1241,7 @@ CURRENT-DEPTH is used for recoursive purposes."
                                        (funcall transform-fn full-dir)
                                      full-dir)
                                    found-dirs)))
-                     (when-let ((subdirs (gh-repo--find-in-dir full-dir
+                     (when-let* ((subdirs (gh-repo--find-in-dir full-dir
                                                                pattern
                                                                non-visit-pattern
                                                                max-depth
@@ -1414,7 +1414,7 @@ The default value is nil."
 
 (defun gh-repo-read-auth-marker ()
   "Retrieve and optionally save GitHub auth info."
-  (when-let ((variants
+  (when-let* ((variants
               (seq-uniq
                (auth-source-search
                 :host "api.github.com"
@@ -1718,7 +1718,7 @@ Argument URL is the url of a GitHub gist."
                                     cands)))
                                (let ((input ivy-text)
                                      (pos
-                                      (when-let ((wind
+                                      (when-let* ((wind
                                                   (active-minibuffer-window)))
                                         (with-selected-window
                                             wind
@@ -1754,7 +1754,7 @@ Argument URL is the url of a GitHub gist."
                                        (aset v 7 ivy--index))))
                                  (ivy--reset-state
                                   ivy-last)
-                                 (when-let ((wind
+                                 (when-let* ((wind
                                              (active-minibuffer-window)))
                                    (with-selected-window
                                        wind
@@ -1959,14 +1959,14 @@ Argument ARGS is a list of additional arguments that will be passed to the FN."
             (with-selected-window buff-wnd
               (apply fn args))
           (apply fn args))
-        (when-let ((timer-value (symbol-value timer-sym)))
+        (when-let* ((timer-value (symbol-value timer-sym)))
           (when (timerp timer-value)
             (cancel-timer timer-value)))))))
 
 (defun gh-repo-debounce (timer-sym delay fn &rest args)
   "Debounce execution FN with ARGS for DELAY.
 TIMER-SYM is a symbol to use as a timer."
-  (when-let ((timer-value (symbol-value timer-sym)))
+  (when-let* ((timer-value (symbol-value timer-sym)))
     (when (timerp timer-value)
       (cancel-timer timer-value)))
   (set timer-sym (apply #'run-with-timer delay nil
@@ -2042,7 +2042,7 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
                                 (gh-repo--check-function-advice
                                  'completing-read-default)))))
             (lambda (&rest _)
-              (when-let ((char (and
+              (when-let* ((char (and
                                 (> (point)
                                    (minibuffer-prompt-end))
                                 (char-before (point)))))
@@ -2056,7 +2056,7 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
             (lambda (&rest _)
               (completion--flush-all-sorted-completions))))))
     (lambda (&rest args)
-      (when-let ((wind (active-minibuffer-window)))
+      (when-let* ((wind (active-minibuffer-window)))
         (with-selected-window wind
           (apply fn args))))))
 
@@ -2158,13 +2158,13 @@ Optional argument INITIAL-INPUT is a string to start search with."
                      (when (and items text str (equal text str))
                        (funcall update-fn keys text)))))))))
          (hook-fn (lambda (&rest _)
-                    (when-let ((text
+                    (when-let* ((text
                                 (gh-repo-get-minibuffer-input)))
                       (unless (or done
                                   (and last-text
                                        (string= last-text text)))
                         (setq last-text text)
-                        (if-let ((cache (gethash text prefix-hash)))
+                        (if-let* ((cache (gethash text prefix-hash)))
                             (gh-repo-debounce
                              'gh-repo-minibuffer-timer
                              0.5
@@ -2302,7 +2302,7 @@ Return the category metadatum as the type of the target."
     (run-hook-wrapped
      'gh-repo-minibuffer-targets-finders
      (lambda (fun)
-       (when-let ((result (funcall fun)))
+       (when-let* ((result (funcall fun)))
          (when (and (cdr-safe result)
                     (stringp (cdr-safe result))
                     (not (string-empty-p (cdr-safe result))))
@@ -2322,7 +2322,7 @@ Return the category metadatum as the type of the target."
   (when (eq this-command 'minibuffer-next-completion)
     (remove-hook 'post-command-hook
                  #'gh-repo--minibuffer-restore-completions-window)
-    (when-let ((win (get-buffer-window "*Completions*" 0)))
+    (when-let* ((win (get-buffer-window "*Completions*" 0)))
       (fit-window-to-buffer win completions-max-height))))
 
 (defun gh-repo-browse-current-repo-and-exit ()
@@ -2337,7 +2337,7 @@ Return the category metadatum as the type of the target."
 
 (defun gh-repo-get-minibuffer-input ()
   "Retrieve user input from the minibuffer in GitHub repository."
-  (when-let ((wind (active-minibuffer-window)))
+  (when-let* ((wind (active-minibuffer-window)))
     (with-selected-window wind
       (let ((str (string-trim (or (car
                                    (split-string
@@ -2533,7 +2533,7 @@ page."
                                            "gh-repo: An error occured"))))
                :callback
                (lambda (value &rest _)
-                 (if-let ((name (alist-get 'full_name value)))
+                 (if-let* ((name (alist-get 'full_name value)))
                      (if
                          (yes-or-no-p (format "Clone repo %s?"
                                               name))
@@ -2672,7 +2672,7 @@ Argument ACTION is a function to be called with the repository name.
 
 Argument ITEM is an alist representing the repository, where \\='full_name is
 expected to be a key."
-  (when-let ((name (alist-get
+  (when-let* ((name (alist-get
                     'full_name
                     item)))
     (funcall action name)))
@@ -2759,7 +2759,7 @@ of the repository list."
                                 #'gh-repo-tree-no-select)
                         "o"
                         (lambda (item)
-                          (when-let ((login (alist-get 'login
+                          (when-let* ((login (alist-get 'login
                                              (alist-get 'owner
                                               item))))
                            (gh-repo-list-user-repos
@@ -2852,7 +2852,7 @@ Optional argument PER-PAGE is an integer representing the number of results per
 page."
   (unless page (setq page 1))
   (let* ((buff-name (concat "*gh-repo " "search/repositories" "*")))
-    (cond ((when-let ((buff (get-buffer buff-name)))
+    (cond ((when-let* ((buff (get-buffer buff-name)))
              (and
               (= page (buffer-local-value 'gh-repo-list--page buff))
               (equal (buffer-local-value 'gh-repo-list--text buff) text)
@@ -3225,7 +3225,7 @@ Argument ACTION is a function to be called with the current minibuffer candidate
 as its argument."
   (pcase-let ((`(,_category . ,current)
                (gh-repo-minibuffer-get-current-candidate)))
-    (when-let ((win (get-buffer-window "*Completions*" 0)))
+    (when-let* ((win (get-buffer-window "*Completions*" 0)))
       (minimize-window win)
       (add-hook 'post-command-hook
                 #'gh-repo--minibuffer-restore-completions-window))
@@ -3253,7 +3253,7 @@ as its argument."
            (gh-repo-tree--preview-repo-file-action path)
          (and wnd
               (with-selected-window wnd
-                (when-let ((key (where-is-internal
+                (when-let* ((key (where-is-internal
                                  'exit-minibuffer
                                  minibuffer-mode-map
                                  t t
@@ -3308,7 +3308,7 @@ Remaining arguments ARGS are the arguments to be passed to the function FN."
             (with-selected-window buff-wnd
               (apply fn args))
           (apply fn args))
-        (when-let ((timer-value (symbol-value timer-sym)))
+        (when-let* ((timer-value (symbol-value timer-sym)))
           (when (timerp timer-value)
             (cancel-timer timer-value)))))))
 
@@ -3324,7 +3324,7 @@ executing FN.
 Argument FN is the function to be called after the delay.
 
 Remaining arguments ARGS are passed to FN when it is called."
-  (when-let ((timer-value (symbol-value timer-sym)))
+  (when-let* ((timer-value (symbol-value timer-sym)))
     (when (timerp timer-value)
       (cancel-timer timer-value)))
   (set timer-sym (apply #'run-with-timer delay nil
@@ -3557,7 +3557,7 @@ Argument PATH is the string to match against the `path' key in the alists.
 
 Argument PATHS is a list of alists where each alist represents a code item."
   (seq-find (lambda (alist)
-              (when-let ((item-path (cdr (assq 'path alist))))
+              (when-let* ((item-path (cdr (assq 'path alist))))
                 (string= item-path path)))
             paths))
 
@@ -3719,7 +3719,7 @@ retrieved file content."
          url))
        nil
        :errorback (lambda (_err _headers status _req)
-                    (when-let ((err
+                    (when-let* ((err
                                 (gh-repo-tree--get-status-error status))
                                (buff (get-buffer buff-name)))
                       (with-current-buffer buff
@@ -3772,7 +3772,7 @@ retrieved file content."
                    (pop-to-buffer-same-window buff))
                  (let ((wnd (get-buffer-window buff)))
                    (with-selected-window wnd
-                     (when-let ((found (re-search-forward
+                     (when-let* ((found (re-search-forward
                                         (regexp-quote
                                          search-str)
                                         nil t 1)))
@@ -3808,7 +3808,7 @@ Argument PATHS is a list of directory paths associated with the REPO."
 
 Argument STATUS is a plist containing the status information, including any
 error details."
-  (when-let ((err (plist-get status :error)))
+  (when-let* ((err (plist-get status :error)))
     (concat (propertize
              "gh-repo error: "
              'face
@@ -3816,7 +3816,7 @@ error details."
             (mapconcat (apply-partially #'format "%s")
                        (delq nil
                              (list (or
-                                    (when-let ((type
+                                    (when-let* ((type
                                                 (ignore-errors
                                                   (cadr
                                                    err))))
@@ -3892,7 +3892,7 @@ the fetch operation."
                                  (funcall callback value)
                                tree)))
                :errorback (lambda (_err _headers status _req)
-                            (if-let ((err
+                            (if-let* ((err
                                       (gh-repo-tree--get-status-error status)))
                                 (funcall (or on-error #'message) err)))))
 
@@ -4055,7 +4055,7 @@ of PARENT."
       (when children
         (forward-line 1)
         (while
-            (when-let ((parent-id (get-text-property (point) 'parent)))
+            (when-let* ((parent-id (get-text-property (point) 'parent)))
               (when (gh-repo-tree--parent-of id
                                              parent-id)
                 (zerop (forward-line 1)))))
@@ -4092,8 +4092,8 @@ of PARENT."
                      (not (bobp)))
                 (1- (line-end-position)))
                (t (point)))))
-    (when-let ((value (get-text-property position prop)))
-      (when-let ((beg (or (previous-single-property-change position prop)
+    (when-let* ((value (get-text-property position prop)))
+      (when-let* ((beg (or (previous-single-property-change position prop)
                           (point-min)))
                  (end (or (next-single-property-change position prop)
                           (point-max))))
@@ -4219,7 +4219,7 @@ Argument REPO is a string representing the GitHub repository to browse."
   (interactive)
   (if (get-text-property (point) 'children)
       (gh-repo-tree--toggle-row-at-point)
-    (when-let ((id (get-text-property (point) 'id)))
+    (when-let* ((id (get-text-property (point) 'id)))
       (gh-repo-tree--preview-repo-file-action id))))
 
 (defun gh-repo-tree--view-file-no-select (&rest _)
@@ -4426,7 +4426,7 @@ be rendered."
       (funcall #'gh-repo-tree--render-tree
                (gh-repo-tree--group-files
                 value))
-      (if-let ((readme (gh-repo--find-readme value)))
+      (if-let* ((readme (gh-repo--find-readme value)))
           (gh-repo-tree--fetch-readme
            readme
            (lambda (code)
@@ -4543,7 +4543,7 @@ Argument REPO is a string representing the GitHub repository in the format
                          (read-string "User and repository (user/repo): "))))
   (let ((buff (gh-repo-tree--setup-repo-buffer
                (gh-repo--normalize-repo-name repo))))
-    (if-let ((wnd (get-buffer-window buff)))
+    (if-let* ((wnd (get-buffer-window buff)))
         (select-window wnd)
       (gh-repo-tree--window-with-other-window
        (pop-to-buffer-same-window buff)))))
