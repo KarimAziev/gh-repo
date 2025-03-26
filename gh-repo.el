@@ -2541,6 +2541,18 @@ page."
                        (message "gh-repo: Repository %s created." name))
                    (message "gh-repo: Repository is not created"))))))
 
+(defun gh-repo--string-alist-to-symbol-alist (data)
+  "Convert string keys in DATA to symbols in an association list.
+
+Argument DATA is a list of cons cells where the car is a string and the cdr is
+any value."
+  (mapcar (lambda (cell)
+            (if (not (stringp (car cell)))
+                cell
+              (cons (make-symbol (car cell))
+                    (cdr cell))))
+          data))
+
 ;;;###autoload
 (defun gh-repo-create-repo (args)
   "Create a new repository from transient arguments ARGS."
@@ -2553,7 +2565,7 @@ page."
              (new-cell (cons "name" name)))
         (setq obj (assoc-delete-all "name" obj))
         (setq obj (push new-cell obj))))
-    (gh-repo--post obj)))
+    (gh-repo--post (gh-repo--string-alist-to-symbol-alist obj))))
 
 (defun gh-repo-get-search-query ()
   "Generate a search query string from the current transient command arguments."
