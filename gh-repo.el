@@ -1345,62 +1345,65 @@ successfully."
              (set-process-filter proc #'comint-output-filter)))))
 
 (defun gh-repo--auth-source-get (keys &rest spec)
-  "Retrieve authentication data for GitHub repositories.
+  "Retrieve values for KEYS from authentication source using SPEC.
 
-Argument KEYS is a list of keys for which values are to be retrieved from
-the authentication source.
+Argument KEYS is a list or a single key to retrieve from the plist.
 
-Optional argument SPEC is a variable argument list that specifies the
-search criteria for the authentication source."
+If KEYS is nil, return whole authentication source.
+
+Remaining arguments SPEC are additional specifications for the search."
   (declare (indent 1))
   (let ((plist (car (apply #'auth-source-search
                            (append spec (list :max 1))))))
-    (mapcar (lambda (k)
-              (plist-get plist k))
-            keys)))
+    (if (not keys)
+        plist
+      (mapcar (lambda (k)
+                (plist-get plist k))
+              (if (listp keys)
+                  keys
+                (list keys))))))
 
 (defun gh-repo-authenticate (&optional force)
-  "Authenticate a GitHub repository, optionally forcing a `re-authentication'.
+  "Authenticate a GitHub repository, optionally forcing a re-authentication.
 
-Optional argument FORCE is a boolean.
-If non-nil, it forces the function to re-authenticate by clearing the cached
-authentication data.
+If optional argument FORCE is a non-nil, it forces the function to
+re-authenticate by clearing the cached authentication data.
+
 The default value is nil."
   (when force (setq gh-repo--cached-auth-data nil))
   (or gh-repo--cached-auth-data
       (setq gh-repo--cached-auth-data
-            (pcase gh-repo-ghub-auth-info
-              ((pred functionp)
-               (funcall gh-repo-ghub-auth-info))
-              (`((and ,username
-                  (stringp ,username)
-                  (not (string-empty-p ,username)))
-                 .
-                 (and ,marker
-                  (symbolp ,marker)
-                  ,marker))
-               (let* ((user (format "%s^%s" username marker))
-                      (token
-                       (or (car (gh-repo--auth-source-get (list :secret)
-                                  :host "api.github.com"
-                                  :user user))
-                           (auth-source-forget (list
-                                                :host "api.github.com"
-                                                :user user
-                                                :max 1)))))
-                 (cons username
-                       (if (functionp token)
-                           (funcall token)
-                         token))))
-              (`((and ,username
-                  (stringp ,username)
-                  (not (string-empty-p ,username)))
-                 .
-                 (and ,marker
-                  (stringp ,marker)
-                  ,marker))
-               (cons username marker))
-              (_ (gh-repo-read-auth-marker))))))
+            (pcase-let ((`(,username . ,marker)
+                         (and
+                          (consp gh-repo-ghub-auth-info)
+                          gh-repo-ghub-auth-info)))
+              (cond ((functionp gh-repo-ghub-auth-info)
+                     (funcall gh-repo-ghub-auth-info))
+                    ((and marker
+                          (symbolp marker)
+                          (stringp username)
+                          (not (string-empty-p username)))
+                     (let* ((user (format "%s^%s" username marker))
+                            (token
+                             (or (car (gh-repo--auth-source-get (list :secret)
+                                        :host "api.github.com"
+                                        :user user))
+                                 (auth-source-forget (list
+                                                      :host "api.github.com"
+                                                      :user user
+                                                      :max 1)))))
+                       (cons username
+                             (if (functionp token)
+                                 (funcall token)
+                               token))))
+                    ((and marker
+                          (stringp marker)
+                          (stringp username)
+                          (not (string-empty-p username)))
+                     (cons username marker))
+                    (t (gh-repo-read-auth-marker)))))))
+
+
 
 ;;;###autoload
 (defun gh-repo-change-user ()
@@ -1415,14 +1418,14 @@ The default value is nil."
 (defun gh-repo-read-auth-marker ()
   "Retrieve and optionally save GitHub auth info."
   (when-let* ((variants
-              (seq-uniq
-               (auth-source-search
-                :host "api.github.com"
-                :require '(:user :secret)
-                :max most-positive-fixnum)
-               (lambda (a b)
-                 (equal (auth-info-password a)
-                        (auth-info-password b))))))
+               (seq-uniq
+                (auth-source-search
+                 :host "api.github.com"
+                 :require '(:user :secret)
+                 :max most-positive-fixnum)
+                (lambda (a b)
+                  (equal (auth-info-password a)
+                         (auth-info-password b))))))
     (pcase-let* ((users (seq-filter (apply-partially #'string-match-p "\\^")
                                     (delq nil
                                           (mapcar
