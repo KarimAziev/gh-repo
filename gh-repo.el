@@ -2020,7 +2020,7 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
                 hows)
           (setq flist (advice--cdr flist))))
       hows)))
-
+(defvar vertico--input)
 (defun gh-repo-minibuffer-get-update-fn ()
   "Update the minibuffer's completion candidates based on the current mode."
   (let ((fn
@@ -2040,17 +2040,16 @@ Argument ITEMS is a list of ITEMS to be updated in the Ivy candidates."
               (when (fboundp 'icomplete-exhibit)
                 (icomplete-exhibit))))
            ((guard (and (eq completing-read-function 'completing-read-default)
+                        (fboundp 'vertico--exhibit)
                         (assq 'vertico--advice
                               (ignore-errors
                                 (gh-repo--check-function-advice
                                  'completing-read-default)))))
             (lambda (&rest _)
-              (when-let* ((char (and
-                                (> (point)
-                                   (minibuffer-prompt-end))
-                                (char-before (point)))))
-                (call-interactively #'backward-delete-char)
-                (execute-kbd-macro (char-to-string char)))))
+              (completion--flush-all-sorted-completions)
+              (when vertico--input
+                (setq vertico--input t)
+                (vertico--exhibit))))
            ('completing-read-default
             (lambda (&rest _)
               (completion--flush-all-sorted-completions)
