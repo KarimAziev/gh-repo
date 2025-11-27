@@ -2444,26 +2444,61 @@ ACTION to perform on the repository."
 
 (defun gh-repo--read-auth-from-gh-config ()
   "Extract and return GitHub username and OAuth token from gh config file."
-  (pcase-let* ((`(,username . ,file)
+  (pcase-let* ((`(,active-usr ,users-alist)
                 (with-temp-buffer
-                  (when (zerop
-                         (call-process
-                          "gh" nil t
-                          nil "auth" "status"))
-                    (re-search-backward
-                     "Logged in to github.com as \\([a-zA-Z0-9-]*[a-zA-Z0-9]\\{1\\}\\)[\s\t\n]+[(]\\([^)]+\\)[)]"
-                     nil t 1)
-                    (cons (match-string-no-properties 1)
-                          (match-string-no-properties 2)))))
-               (token (and username file
-                           (file-exists-p file)
-                           (with-temp-buffer
-                             (insert-file-contents file)
-                             (when (re-search-forward
-                                    "github\\.com:[\s\n]+oauth_token:[\s]+\\([^\n]+\\)"
-                                    nil t 1)
-                               (match-string-no-properties
-                                1))))))
+                  (if (not (zerop
+                            (call-process
+                             "gh" nil t
+                             nil "auth" "status")))
+                      (progn (message (string-trim (buffer-string)))
+                             nil)
+                    (let ((usrs)
+                          (case-fold-search t)
+                          (prev-pos)
+                          (active-usr))
+                      (while (re-search-backward
+                              "Logged in to github.com \\(as\\|account\\) \\([a-zA-Z0-9-]*[a-zA-Z0-9]\\{1\\}\\)[\s\t\n]+[(]\\([^)]+\\)[)]"
+                              nil t 1)
+                        (let ((name (match-string-no-properties 2))
+                              (file-or-type (match-string-no-properties 3))
+                              (pos (point)))
+                          (push (cons name file-or-type) usrs)
+                          (unless active-usr
+                            (setq active-usr
+                                  (save-excursion
+                                    (and (re-search-forward "active\\([\s\t]+account\\)?\\(:\\)?" prev-pos t 1)
+                                         (re-search-forward "\\_<\\(true\\)\\_>" (line-end-position) t 1)
+                                         name))))
+                          (setq prev-pos pos)))
+                      (list active-usr
+                            usrs)))))
+               (`(,username . ,file-or-type)
+                (or (and active-usr
+                         (assoc-string active-usr users-alist))
+                    (if (<= (length users-alist) 1)
+                        (car users-alist)
+                      (completing-read "User: " (mapcar #'car users-alist)))))
+               (token (and username
+                           (or
+                            (and file-or-type
+                                 (not (string= file-or-type "keyring"))
+                                 (file-name-absolute-p file-or-type)
+                                 (file-exists-p file-or-type)
+                                 (with-temp-buffer
+                                   (insert-file-contents file-or-type)
+                                   (when (re-search-forward
+                                          "github\\.com:[\s\n]+oauth_token:[\s]+\\([^\n]+\\)"
+                                          nil t 1)
+                                     (match-string-no-properties
+                                      1))))
+                            (with-temp-buffer
+                              (when (zerop
+                                     (call-process
+                                      "gh" nil t
+                                      nil "auth" "token"))
+                                (skip-chars-backward "\n\s\t")
+                                (buffer-substring-no-properties (point-min)
+                                                                (point))))))))
     (and token (cons username token))))
 
 (defun gh-repo-auth-from-gh-config ()
