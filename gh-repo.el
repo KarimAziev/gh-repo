@@ -1191,6 +1191,8 @@ PATTERN can be either string or function, or list of strings and functions."
         (apply-partially #'gh-repo--expand-pattern curr)
         pattern))))
 
+(defvar gh-repo--non-readable-dirs (make-hash-table :test #'equal))
+
 (defun gh-repo--find-in-dir (dir &optional pattern non-visit-pattern max-depth
                                  transform-fn current-depth)
   "Return list of files that matches PATTERN in DIR at MAX-DEPTH.
@@ -1224,7 +1226,13 @@ CURRENT-DEPTH is used for recoursive purposes."
                                 directory-files-no-dot-files-regexp t))
             (let ((full-dir (expand-file-name curr))
                   (tramp-archive-enabled nil))
-              (cond ((not (file-directory-p full-dir)))
+              (cond ((or
+                      (gethash full-dir gh-repo--non-readable-dirs)
+                      (not (file-directory-p full-dir))))
+                    ((or
+                      (not (file-readable-p full-dir))
+                      (not (file-accessible-directory-p full-dir)))
+                     (puthash full-dir t gh-repo--non-readable-dirs))
                     ((and non-visit-pattern
                           (gh-repo--expand-pattern curr non-visit-pattern)))
                     ((and pattern
@@ -1242,11 +1250,11 @@ CURRENT-DEPTH is used for recoursive purposes."
                                      full-dir)
                                    found-dirs)))
                      (when-let* ((subdirs (gh-repo--find-in-dir full-dir
-                                                               pattern
-                                                               non-visit-pattern
-                                                               max-depth
-                                                               transform-fn
-                                                               current-depth)))
+                                                                pattern
+                                                                non-visit-pattern
+                                                                max-depth
+                                                                transform-fn
+                                                                current-depth)))
                        (setq found-dirs
                              (if found-dirs
                                  (nconc
